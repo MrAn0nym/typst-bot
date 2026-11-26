@@ -4,6 +4,7 @@ A Discord bot that renders Typst code.
 
 Built with poise so it has all the goodies like edit tracking, typing status, and automatic help generation.
 In addition to commands, any user message containing `$` is rendered in its entirety and the result is posted as a reply.
+Successful renders show their creator in bold and include buttons to delete the render or the source message. These buttons expire after five minutes and can only be used by the creator.
 
 ## Hosting
 

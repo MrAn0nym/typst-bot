@@ -1,7 +1,12 @@
 use poise::serenity_prelude::{GatewayIntents, Message};
-use serenity::all::{Context, CreateAttachment, CreateMessage, EventHandler};
+use serenity::all::{
+	Context, CreateAllowedMentions, CreateAttachment, CreateMessage, EventHandler, Interaction,
+};
 use tokio::sync::{mpsc, Mutex};
 
+use crate::render_controls::{
+	create_components, handle_component_interaction, render_attribution, schedule_expiration,
+};
 use crate::worker::Worker;
 
 const PREAMBLE: &str = concat!(
@@ -34,12 +39,27 @@ impl EventHandler for InlineMathHandler {
 			let rendered = self.worker.lock().await.render(source, progress_sender).await;
 			match rendered {
 				Ok(rendered) if !rendered.images.is_empty() => {
-					let mut reply = CreateMessage::new().reference_message(&message);
+					let controls = create_components(message.author.id, message.channel_id, message.id);
+					let expires_at = controls.expires_at;
+					let mut reply = CreateMessage::new()
+						.reference_message(&message)
+						.content(render_attribution(message.author.id.get()))
+						.allowed_mentions(CreateAllowedMentions::new())
+						.components(controls.components);
 					for (index, image) in rendered.images.into_iter().enumerate() {
-						reply = reply.add_file(CreateAttachment::bytes(image, format!("page-{}.png", index + 1)));
+						reply = reply.add_file(CreateAttachment::bytes(
+							image,
+							format!("page-{}.png", index + 1),
+						));
 					}
-					if let Err(error) = message.channel_id.send_message(&ctx.http, reply).await {
-						tracing::error!(?error, "Failed to send inline math render");
+					match message.channel_id.send_message(&ctx.http, reply).await {
+						Ok(render_message) => schedule_expiration(
+							&ctx,
+							render_message.channel_id,
+							render_message.id,
+							expires_at,
+						),
+						Err(error) => tracing::error!(?error, "Failed to send inline math render"),
 					}
 				}
 				Ok(_) => {
@@ -59,6 +79,14 @@ impl EventHandler for InlineMathHandler {
 						tracing::error!(?error, "Failed to send inline math render error");
 					}
 				}
+			}
+		}
+	}
+
+	async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
+		if let Interaction::Component(interaction) = interaction {
+			if let Err(error) = handle_component_interaction(&ctx, &interaction).await {
+				tracing::error!(?error, "Failed to respond to render control interaction");
 			}
 		}
 	}
