@@ -6,7 +6,7 @@ use std::time::Duration;
 use poise::serenity_prelude::GatewayIntents;
 use poise::{async_trait, CreateReply};
 use protocol::VersionResponse;
-use serenity::all::Interaction;
+use serenity::all::{Context as SerenityContext, Interaction};
 use serenity::builder::{CreateAllowedMentions, CreateAttachment};
 use serenity::client::FullEvent;
 use tokio::join;
@@ -534,7 +534,7 @@ async fn handle_error(
 }
 
 async fn handle_framework_event(
-	ctx: &serenity::Context,
+	ctx: &SerenityContext,
 	event: &FullEvent,
 	_framework: poise::FrameworkContext<'_, Data, PoiseError>,
 	_data: &Data,
