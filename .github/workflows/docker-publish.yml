@@ -14,8 +14,6 @@ on:
 env:
   # Use docker.io for Docker Hub if empty
   REGISTRY: ghcr.io
-  # github.repository as <account>/<repo>
-  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   build:
@@ -38,6 +36,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Normalize image name
+        id: image
+        run: printf 'name=%s\n' "${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
       # Each architecture uses a native runner, so QEMU is not needed.
       # https://github.com/docker/setup-buildx-action
       - name: Set up Docker Buildx
@@ -47,7 +49,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@96383f45573cb7f253c731d3b3ab81c87ef81934 # v5.0.0
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}
 
       - name: Log into registry ${{ env.REGISTRY }}
         if: github.event_name != 'pull_request'
@@ -64,7 +66,7 @@ jobs:
           context: .
           platforms: ${{ matrix.platform }}
           push: false
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}-${{ matrix.suffix }}
+          tags: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}:${{ github.sha }}-${{ matrix.suffix }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.suffix }}
           cache-to: type=gha,scope=${{ matrix.suffix }},mode=max
@@ -76,7 +78,7 @@ jobs:
         with:
           context: .
           platforms: ${{ matrix.platform }}
-          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.suffix }}
           cache-to: type=gha,scope=${{ matrix.suffix }},mode=max
@@ -113,6 +115,10 @@ jobs:
       id-token: write
 
     steps:
+      - name: Normalize image name
+        id: image
+        run: printf 'name=%s\n' "${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
       - name: Install cosign
         uses: sigstore/cosign-installer@59acb6260d9c0ba8f4a2f9d9b48431a222b68e20 # v3.5.0
         with:
@@ -139,11 +145,11 @@ jobs:
         id: meta
         uses: docker/metadata-action@96383f45573cb7f253c731d3b3ab81c87ef81934 # v5.0.0
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}
 
       - name: Create and push multi-platform manifest
         env:
-          IMAGE_NAME: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          IMAGE_NAME: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}
           TAGS: ${{ steps.meta.outputs.tags }}
         run: |
           set -euo pipefail
