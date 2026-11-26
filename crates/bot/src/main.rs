@@ -16,6 +16,7 @@
 
 mod bot;
 mod inline_math;
+mod render_controls;
 mod worker;
 
 const SOURCE_URL: &str = "https://github.com/mattfbacon/typst-bot";

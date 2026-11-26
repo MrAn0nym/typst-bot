@@ -6,10 +6,15 @@ use std::time::Duration;
 use poise::serenity_prelude::GatewayIntents;
 use poise::{async_trait, CreateReply};
 use protocol::VersionResponse;
+use serenity::all::Interaction;
 use serenity::builder::{CreateAllowedMentions, CreateAttachment};
+use serenity::client::FullEvent;
 use tokio::join;
 use tokio::sync::{mpsc, Mutex};
 
+use crate::render_controls::{
+	create_components, handle_component_interaction, render_attribution, schedule_expiration,
+};
 use crate::worker::Worker;
 use crate::SOURCE_URL;
 
@@ -329,9 +334,17 @@ async fn render(
 
 	match res {
 		Ok(res) => {
-			let mut message = CreateReply::default().reply(true);
+			let (source_channel_id, source_message_id) = match ctx {
+				poise::Context::Prefix(prefix) => (prefix.msg.channel_id, prefix.msg.id),
+				poise::Context::Application(_) => unreachable!("render is a prefix command"),
+			};
+			let controls = create_components(ctx.author().id, source_channel_id, source_message_id);
+			let expires_at = controls.expires_at;
+			let mut message = CreateReply::default()
+				.reply(true)
+				.components(controls.components);
 
-			let mut content = String::new();
+			let mut content = format!("{}\n", render_attribution(ctx.author().id.get()));
 
 			if res.images.is_empty() {
 				writeln!(content, "Note: no pages generated").unwrap();
@@ -365,7 +378,14 @@ async fn render(
 				message = message.attachment(image);
 			}
 
-			ctx.send(message).await?;
+			let sent_message = ctx.send(message).await?;
+			let sent_message = sent_message.message().await?;
+			schedule_expiration(
+				ctx.serenity_context(),
+				sent_message.channel_id,
+				sent_message.id,
+				expires_at,
+			);
 		}
 		Err(error) => {
 			let message = format!(
@@ -513,6 +533,24 @@ async fn handle_error(
 	}
 }
 
+async fn handle_framework_event(
+	ctx: &serenity::Context,
+	event: &FullEvent,
+	_framework: poise::FrameworkContext<'_, Data, PoiseError>,
+	_data: &Data,
+) -> Result<(), PoiseError> {
+	if let FullEvent::InteractionCreate {
+		interaction: Interaction::Component(interaction),
+	} = event
+	{
+		if let Err(error) = handle_component_interaction(ctx, interaction).await {
+			tracing::error!(?error, "Failed to respond to render control interaction");
+		}
+	}
+
+	Ok(())
+}
+
 pub async fn run() {
 	let token = match (std::env::var_os("DISCORD_TOKEN"), std::env::var_os("DISCORD_TOKEN_FILE")) {
 		(Some(token), None) => token.into_string().expect("`DISCORD_TOKEN` not UTF-8"),
@@ -542,6 +580,9 @@ pub async fn run() {
 				version(),
 			],
 			allowed_mentions: Some(CreateAllowedMentions::new()),
+			event_handler: |ctx, event, framework, data| {
+				Box::pin(handle_framework_event(ctx, event, framework, data))
+			},
 			on_error: |error| {
 				Box::pin(async move {
 					if let Err(error) = handle_error(error).await {
