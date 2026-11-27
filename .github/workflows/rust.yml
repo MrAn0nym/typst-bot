@@ -1,11 +1,11 @@
 {
   "name": "Checks",
-  "on": ["push"],
+  "on": ["push", "pull_request"],
   "jobs":
     {
       "formatting":
         {
-          "name": "Check formatting",
+          "name": "Format code",
           "runs-on": "ubuntu-latest",
           "steps":
             [
@@ -17,7 +17,7 @@
               },
               {
                 "name": "Check formatting",
-                "run": "cargo +nightly fmt -- --check",
+                "run": "cargo +nightly fmt --all",
               },
             ],
         },

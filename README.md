@@ -7,6 +7,9 @@ full documents. Successful renders include buttons for deleting the output or so
 message; those buttons expire after five minutes and are restricted to the original
 creator.
 
+Use `/render private_preview:true` to receive an ephemeral preview with a button to publish it
+to the channel. The regular `/render` response remains public by default.
+
 ## Architecture
 
 - `typst-bot` connects to Discord and handles commands and messages.
