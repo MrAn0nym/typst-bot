@@ -15,6 +15,7 @@
 #![forbid(unsafe_code)]
 
 mod bot;
+mod conversion;
 mod inline_math;
 mod render_controls;
 mod worker;
