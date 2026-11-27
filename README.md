@@ -7,6 +7,9 @@ full documents. Successful renders include buttons for deleting the output or so
 message; those buttons expire after five minutes and are restricted to the original
 creator.
 
+To render an existing message, right-click it in Discord and choose **Als Typst rendern**.
+Plain message text and fenced Typst code blocks are supported.
+
 Use `/render private_preview:true` to receive an ephemeral preview with a button to publish it
 to the channel. The regular `/render` response remains public by default.
 

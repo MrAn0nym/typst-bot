@@ -6,7 +6,7 @@ use std::time::Duration;
 use poise::serenity_prelude::GatewayIntents;
 use poise::{async_trait, CreateReply};
 use protocol::VersionResponse;
-use serenity::all::{Attachment, Context as SerenityContext, Interaction};
+use serenity::all::{Attachment, Context as SerenityContext, Interaction, Message};
 use serenity::builder::{CreateAllowedMentions, CreateAttachment, CreateEmbed};
 use serenity::client::FullEvent;
 use tokio::join;
@@ -328,11 +328,13 @@ Render Typst documents and snippets directly in Discord.
 - `?render ```<Typst code>````
 - Alias: `?r ```<Typst code>````
 - Slash command: `/render` with source in the `code` option
+- Message menu: right-click a message and choose `Als Typst rendern`
 - Inline math: include `$...$` in any message, for example `The value is $x^2$`.
 - Convert documents with `/latex-to-typst` or `/typst-to-latex`.
 
 **Commands**
 - `/render`, `?render`, `?r` — render Typst; use `/help command:render` for options and examples
+- Message menu `Als Typst rendern` — render a message's text or code block
 - `/ast`, `?ast` — show the parsed syntax tree
 - `/latex-to-typst`, `/typst-to-latex` — convert source text or attached `.tex` / `.typ` files
 - `/version`, `?version` — show the bot and Typst versions
@@ -354,7 +356,7 @@ fn general_help_embed() -> CreateEmbed {
 		.description(general_help())
 		.field(
 			"Render Typst",
-			"`/render` or `?render <code block>`",
+			"`/render`, `?render <code block>`, or right-click a message",
 			false,
 		)
 		.field(
@@ -623,6 +625,115 @@ async fn slash_render(
 				sanitize_code_block(&format!("{error:?}")),
 			);
 			ctx.reply(message).await?;
+		}
+	}
+
+	Ok(())
+}
+
+fn context_menu_source(message: &Message) -> Option<String> {
+	normalize_context_menu_source(&message.content)
+}
+
+fn normalize_context_menu_source(content: &str) -> Option<String> {
+	let mut source = content.trim().to_owned();
+	if source.starts_with("```") {
+		source = source
+			.strip_prefix("```")
+			.unwrap_or(&source)
+			.strip_suffix("```")
+			.unwrap_or(source.as_str())
+			.trim()
+			.to_owned();
+
+		if let Some((language, rest)) = source.split_once('\n') {
+			if !language.is_empty() && language.chars().all(|c| !c.is_whitespace()) {
+				source = rest.trim().to_owned();
+			}
+		}
+	}
+
+	let pattern = format!("`{ZERO_WIDTH_JOINER}`");
+	source = source
+		.replace(&pattern, "``")
+		.replace(&pattern, "``");
+
+	(!source.trim().is_empty()).then(|| source)
+}
+
+/// Render the text or code block of a message as Typst.
+#[poise::command(context_menu_command = "Als Typst rendern")]
+async fn render_message(ctx: Context<'_>, message: Message) -> Result<(), PoiseError> {
+	let Some(source) = context_menu_source(&message) else {
+		ctx.reply("The selected message does not contain any text to render.")
+			.await?;
+		return Ok(());
+	};
+
+	ctx.defer().await?;
+
+	let mut render_source = Preamble::default().preamble();
+	render_source.push_str(&source);
+
+	let pool = &ctx.data().pool;
+	let (progress_send, _progress_recv) = mpsc::channel(4);
+	let res = pool
+		.lock()
+		.await
+		.render(render_source, progress_send)
+		.await;
+
+	match res {
+		Ok(res) => {
+			let controls = create_components(ctx.author().id, message.channel_id, message.id);
+			let mut message_reply = CreateReply::default()
+				.components(controls.components);
+
+			let mut content = format!("{}\n", render_attribution(ctx.author().id.get()));
+			if res.images.is_empty() {
+				writeln!(content, "Note: no pages generated").unwrap();
+			}
+			if res.more_pages > 0 {
+				writeln!(
+					content,
+					"Note: {} more page{} ignored",
+					res.more_pages,
+					if res.more_pages == 1 { "" } else { "s" },
+				)
+				.unwrap();
+			}
+			if !res.warnings.is_empty() {
+				writeln!(
+					content,
+					"Render succeeded with warnings:\n```ansi\n{}\n```",
+					sanitize_code_block(&res.warnings),
+				)
+				.unwrap();
+			}
+			message_reply = message_reply.content(content);
+
+			for (i, image) in res.images.into_iter().enumerate() {
+				message_reply = message_reply.attachment(CreateAttachment::bytes(
+					image,
+					format!("page-{}.png", i + 1),
+				));
+			}
+
+			let sent_message = ctx.send(message_reply).await?;
+			let sent_message = sent_message.message().await?;
+			schedule_expiration(
+				ctx.serenity_context(),
+				sent_message.channel_id,
+				sent_message.id,
+				controls.expires_at,
+			);
+		}
+		Err(error) => {
+			let reply = format!(
+				"An error occurred:\n```ansi\n{}\n```",
+				sanitize_code_block(&format!("{error:?}")),
+			);
+			ctx.reply(reply).await?;
 		}
 	}
 
@@ -996,6 +1107,27 @@ mod tests {
 	use super::{conversion_help, general_help, normalize_help_command, render_help};
 
 	#[test]
+	fn message_context_menu_is_registered() {
+		let command = super::render_message();
+
+		assert_eq!(command.name, "Als Typst rendern");
+		assert!(command.context_menu_action.is_some());
+	}
+
+	#[test]
+	fn context_menu_source_accepts_plain_text_and_code_blocks() {
+		assert_eq!(
+			super::normalize_context_menu_source("= Heading"),
+			Some("= Heading".to_owned()),
+		);
+		assert_eq!(
+			super::normalize_context_menu_source("```typ\n= Heading\n```"),
+			Some("= Heading".to_owned()),
+		);
+		assert_eq!(super::normalize_context_menu_source("  "), None);
+	}
+
+	#[test]
 	fn ast_is_registered_as_a_slash_command() {
 		let command = super::slash_ast();
 
@@ -1034,6 +1166,7 @@ mod tests {
 		let help = general_help();
 
 		assert!(help.contains("`/render`"));
+		assert!(help.contains("Als Typst rendern"));
 		assert!(help.contains("`/ast`"));
 		assert!(help.contains("`/latex-to-typst`"));
 		assert!(help.contains("`/typst-to-latex`"));
@@ -1111,6 +1244,7 @@ pub async fn run(inline_math_settings: InlineMathSettings) {
 			commands: vec![
 				render(),
 				slash_render(),
+				render_message(),
 				help(),
 				inline_math(),
 				source(),
