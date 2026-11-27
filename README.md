@@ -1,54 +1,90 @@
 # Typst Bot
 
-A Discord bot that renders Typst code.
+A Discord bot that renders [Typst](https://typst.app/) code.
 
-Built with poise so it has all the goodies like edit tracking, typing status, and automatic help generation.
-In addition to commands, any user message containing `$` is rendered in its entirety and the result is posted as a reply.
-Successful renders show their creator in bold and include buttons to delete the render or the source message. These buttons expire after five minutes and can only be used by the creator.
+The bot supports slash commands and renders messages containing `$` as inline math or
+full documents. Successful renders include buttons for deleting the output or source
+message; those buttons expire after five minutes and are restricted to the original
+creator.
 
-## Hosting
+## Architecture
 
-The bot uses two binaries:
+- `typst-bot` connects to Discord and handles commands and messages.
+- `worker` performs Typst compilation and communicates with `typst-bot`.
 
-- `bot`: connects to Discord and processes messages
-- `worker`: receives requests, interacts with Typst, responds
+`typst-bot` starts `worker` automatically.
 
-`bot` will automatically spawn `worker`, so you only need to run `bot`.
+## Configuration
 
-To set up the working environment, create a directory with the following items:
+Configuration is provided through environment variables:
 
-- `worker`: The worker binary, copied/hardlinked from the target directory after building. If you put the worker somewhere else, you can set `TYPST_BOT_WORKER_PATH` to it.
-- `bot`: The bot binary, copied/hardlinked from the target directory after building. (This doesn't need to be in this directory, but having everything in one place simplifies things.)
-(Legacy note: you don't need `fonts` anymore because we use `typst-assets` now.)
+| Variable | Required | Description |
+| --- | --- | --- |
+| `DISCORD_TOKEN` | Yes | Discord bot token |
+| `CACHE_DIRECTORY` | No | Directory used for downloaded package cache |
+| `SETTINGS_DIRECTORY` | No | Directory used for persistent bot settings |
+| `TYPST_BOT_WORKER_PATH` | No | Path to the worker executable; defaults to `./worker` |
 
-To run, CD into this directory, set `DISCORD_TOKEN` to your bot token, set `CACHE_DIRECTORY` to a package-cache location, optionally set `SETTINGS_DIRECTORY` to a persistent settings location, and run the `bot` binary (not the `worker` binary that's also in the directory).
+The bot rejects a missing or empty `DISCORD_TOKEN`. Do not create a token file.
 
-### Docker
+## Native setup
 
-There is a `Dockerfile` and `docker-compose.yml` for running the bot inside a Docker container.
-The Compose setup keeps package cache and bot settings in separate persistent named volumes.
+Build and run the workspace:
 
-To set up the bot with Docker, create a `discord_token.txt` file containing your bot token and start the container with `docker compose up -d`.
+```sh
+cargo build --release --workspace
+export DISCORD_TOKEN='your-bot-token'
+export CACHE_DIRECTORY='/absolute/path/to/cache'
+export SETTINGS_DIRECTORY='/absolute/path/to/settings'
 
-### Public Instance
+./target/release/typst-bot
+```
 
-Here is a link you can use to invite a public instance run by [@frozolotl](https://github.com/frozolotl): https://discord.com/oauth2/authorize?client_id=1183804211264225301&permissions=3072&scope=bot
+The bot looks for `./worker` by default. If `typst-bot` and `worker` are in different
+locations, set `TYPST_BOT_WORKER_PATH` to the worker executable.
 
-Note: the bot may be limited from joining more servers because we require the message content (since slash commands don't support code blocks) and Discord denied verification, so we are limited to 100 servers. Accordingly, we request that you remove the bot from your servers if you are not using it anymore.
+## Docker setup
 
-### Is it safe to host? Is it true that Typst allows arbitrary code execution?
+The image includes both executables and default cache and settings directories. Supply
+the Discord token through the host environment:
 
-Typst is fundamentally a sandboxed, interpreted language so there is no such thing as "arbitrary code execution".
-However, Typst documents/code can access the host environment in a limited capacity.
-In CLI usage, documents can read files (e.g., images) inside the project directory and download packages from the typst packages repo.
-For the bot, only the latter is allowed. Resource exhaustion and DOS attacks are also somewhat addressed with timeouts and automatic restarting on crash.
-If you are paranoid, I suggest to set up adequate sandboxing on the host (which you should do for everything anyway) -- for example with Docker or systemd sandboxing.
+```sh
+export DISCORD_TOKEN='your-bot-token'
+docker compose up -d --build
+```
 
-## Privacy Policy (for Discord)
+Docker Compose passes `DISCORD_TOKEN` directly into the container. It is not written to
+the image or to a secret file. Package cache and bot settings are retained in the
+`cache` and `settings` named volumes.
 
-The bot does not log or store message content in any way -- message content is only read once to execute the contained Typst code.
-The Discord framework we use, poise/serenity, saves message IDs for a short time period (about an hour) in volatile storage, in order to react to edited or deleted messages. When the bot restarts these data are not retained.
+To stop the bot:
+
+```sh
+docker compose down
+```
+
+## Discord permissions
+
+Invite the bot with the permissions it needs to read messages, create interactions,
+reply to messages, attach files, and add reaction or button controls.
+
+## Security and sandboxing
+
+Typst is interpreted and sandboxed rather than a general-purpose host code execution
+environment. Documents can download packages, but self-hosted bot instances limit file
+and host-resource access. Rendering is also constrained with timeouts and worker
+restarts.
+
+For an exposed deployment, use an additional OS or container sandbox and limit available
+CPU, memory, disk, and network resources.
+
+## Privacy
+
+The bot does not persist message content. Poise/Serenity may retain message IDs in
+volatile memory for about an hour to track edits and deletions. Those IDs are discarded
+when the bot restarts.
 
 ## License
 
-AGPL. Use `@typst-bot source` to get a link to the source from deployments of the bot.
+AGPL-3.0. Use `@typst-bot source` to get a link to the source from a deployment of the
+bot.

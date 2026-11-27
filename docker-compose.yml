@@ -5,13 +5,9 @@ services:
         build: .
         # This service is always restarted if it ever shuts down (unless stopped manually).
         restart: always
-        # The `DISCORD_TOKEN` variable is set within the container to whatever value `DISCORD_TOKEN`
-        # has when Compose is run. It is not saved in the image. Compose will automatically grab its
-        # value from `.env` or the host OS. `?:error` makes it mandatory.
+        # The token is passed from the host environment and is not saved in the image or in a file.
         environment:
-            DISCORD_TOKEN_FILE: /run/secrets/discord_token
-        secrets:
-            - discord_token
+            DISCORD_TOKEN: ${DISCORD_TOKEN:?DISCORD_TOKEN must be set}
         # Package cache and bot settings use separate named volumes.
         volumes:
             - cache:/bot/cache
@@ -21,7 +17,3 @@ services:
 volumes:
     cache:
     settings:
-
-secrets:
-    discord_token:
-        file: discord_token.txt

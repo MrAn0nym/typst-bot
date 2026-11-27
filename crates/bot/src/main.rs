@@ -21,6 +21,18 @@ mod worker;
 
 const SOURCE_URL: &str = "https://github.com/MrAn0nym/typst-bot";
 
+fn discord_token() -> String {
+	let token = std::env::var("DISCORD_TOKEN")
+		.unwrap_or_else(|error| panic!("DISCORD_TOKEN environment variable is required: {error}"));
+	let token = token.trim();
+
+	if token.is_empty() {
+		panic!("DISCORD_TOKEN environment variable cannot be empty");
+	}
+
+	token.to_owned()
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
 	let inline_math_settings = inline_math::InlineMathSettings::from_environment();

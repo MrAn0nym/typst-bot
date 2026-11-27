@@ -904,13 +904,7 @@ mod tests {
 }
 
 pub async fn run(inline_math_settings: InlineMathSettings) {
-	let token = match (std::env::var_os("DISCORD_TOKEN"), std::env::var_os("DISCORD_TOKEN_FILE")) {
-		(Some(token), None) => token.into_string().expect("`DISCORD_TOKEN` not UTF-8"),
-		(None, Some(path)) => std::fs::read_to_string(path).expect("reading from `DISCORD_TOKEN_FILE`"),
-		(Some(_token), Some(_path)) => panic!("both `DISCORD_TOKEN` and `DISCORD_TOKEN_FILE` provided.\nThis is ambiguous and insecure. Please only use one or the other."),
-		(None, None) => panic!("need `DISCORD_TOKEN` or `DISCORD_TOKEN_FILE` env var"),
-	};
-	let token = token.trim();
+	let token = crate::discord_token();
 
 	let pool = Worker::spawn().await.unwrap();
 
