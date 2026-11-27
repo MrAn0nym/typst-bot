@@ -172,7 +172,7 @@ impl<'a> poise::PopArgument<'a> for RenderFlags {
 		args: &'a str,
 		attachment_index: usize,
 		ctx: &serenity::prelude::Context,
-		message: &poise::serenity_prelude::Message,
+		message: &Message,
 	) -> Result<(&'a str, usize, Self), (PoiseError, Option<String>)> {
 		fn inner(raw: &HashMap<String, String>) -> Result<RenderFlags, PoiseError> {
 			let mut parsed = RenderFlags::default();
@@ -389,7 +389,7 @@ impl<'a> poise::PopArgument<'a> for CodeBlock {
 		mut args: &'a str,
 		attachment_index: usize,
 		ctx: &serenity::prelude::Context,
-		message: &poise::serenity_prelude::Message,
+		message: &Message,
 	) -> Result<(&'a str, usize, Self), (PoiseError, Option<String>)> {
 		if let Some(code_block_start) = args.find("```") {
 			args = &args[code_block_start..];
@@ -425,7 +425,7 @@ impl<'a> poise::PopArgument<'a> for Rest {
 		_args: &'a str,
 		attachment_index: usize,
 		_ctx: &serenity::prelude::Context,
-		_message: &poise::serenity_prelude::Message,
+		_message: &Message,
 	) -> Result<(&'a str, usize, Self), (PoiseError, Option<String>)> {
 		Ok(("", attachment_index, Self))
 	}
