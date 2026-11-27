@@ -7,14 +7,16 @@ use poise::serenity_prelude::GatewayIntents;
 use poise::{async_trait, CreateReply};
 use protocol::VersionResponse;
 use serenity::all::{Context as SerenityContext, Interaction};
-use serenity::builder::{CreateAllowedMentions, CreateAttachment};
+use serenity::builder::{CreateAllowedMentions, CreateAttachment, CreateEmbed};
 use serenity::client::FullEvent;
 use tokio::join;
 use tokio::sync::{mpsc, Mutex};
 
 use crate::render_controls::{
-	create_components, handle_component_interaction, render_attribution, schedule_expiration,
+	create_components, create_render_components, handle_component_interaction, render_attribution,
+	schedule_expiration,
 };
+use crate::inline_math::InlineMathSettings;
 use crate::worker::Worker;
 use crate::SOURCE_URL;
 
@@ -149,6 +151,7 @@ impl Preamble {
 
 struct Data {
 	pool: Mutex<Worker>,
+	inline_math_settings: InlineMathSettings,
 }
 
 type PoiseError = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -201,45 +204,97 @@ fn render_help() -> String {
 
 	format!(
 		"\
-Render Typst code as an image.
+**Render Typst code**
+`@typst-bot render [pagesize=<size>] [theme=<theme>] <code block>`
+Alias: `@typst-bot r [ps=<size>] [t=<theme>] <code block>`
 
-Render command syntax:
-- `@typst-bot render [pagesize=<page size>] [theme=<theme>] <code block> [...]`
-- Aliases: `@typst-bot r ps={{p,a,d}} t={{d,l,t}} <code block> [...]`
+**Page size** — `pagesize` / `ps`
+- `preview` / `p` (default): 300pt wide, automatic height, 10pt margin
+- `auto` / `a`: automatic width and height, 10pt margin
+- `default` / `d`: use Typst's page defaults
 
-**Flags**
-- **`pagesize=`** (alias: **`ps=`**):
-  - `preview` (alias `p`, default): 10pt margin, 300pt width, auto height
-  - `auto` (alias `a`): 10pt margin, auto width, auto height
-  - `default` (alias `d`): Leave as Typst's default
-- **`theme=`** (alias **`t=`**):
-  - `dark` (alias `d`, default): Set text and background to match Discord's dark theme
-  - `light` (alias `l`): Set the background to white
-  - `transparent` (alias `t`): Leave the background transparent
+**Theme** — `theme` / `t`
+- `dark` / `d` (default): Discord-dark background and text
+- `light` / `l`: white background
+- `transparent` / `t`: no page fill or text color override
 
-To be clear, the full default preamble is:
+**Default preamble**
 ```
 {default_preamble}
 ```
-To remove the preamble entirely, use `pagesize=default theme=transparent`.
+Use `pagesize=default theme=transparent` to remove the preamble.
 
 **Examples**
 ```
 @typst-bot render `hello, world!`
-
-@typst-bot r ps=a t=l `Short syntax!`
-
-@typst-bot render pagesize=default theme=light ``‍`
+@typst-bot r ps=a t=l `A small, light render`
+@typst-bot render pagesize=default theme=transparent ``‍`
 = Heading!
 
 And some text.
 
 #lorem(100)
 ``‍`
-
-@typst-bot render `#myfunc()` I don't understand this code, can anyone help?
 ```"
 	)
+}
+
+fn normalize_help_command(command: Option<&str>) -> Option<&str> {
+	match command {
+		Some("r") => Some("render"),
+		command => command,
+	}
+}
+
+fn general_help() -> String {
+	"\
+**Typst Bot**
+Render Typst documents and snippets directly in Discord.
+
+**Quick start**
+- `@typst-bot render ```<Typst code>````
+- Alias: `@typst-bot r ```<Typst code>````
+- Inline math: include `$...$` in any message, for example `The value is $x^2$`.
+
+**Commands**
+- `render` / `r` — render Typst code; use `@typst-bot help render` for flags and examples
+- `ast` — show the parsed syntax tree for a code block
+- `version` — show the bot and Typst versions
+- `source` — open the bot's source repository
+- `help [command]` — show this menu or help for one command
+
+**Tips**
+- Edit or delete a command message and the bot will update or remove the response.
+- Render controls let the creator remove the render or source message for five minutes.
+- Use `/help`, `/source`, or `/version` for Discord slash commands.
+- For more detail: `@typst-bot help ast` or `@typst-bot help render`"
+		.to_owned()
+}
+
+fn general_help_embed() -> CreateEmbed {
+	CreateEmbed::new()
+		.title("Typst Bot")
+		.description("Render Typst documents and snippets directly in Discord.")
+		.field(
+			"Render Typst",
+			"`/render` or `@typst-bot render <code block>`",
+			false,
+		)
+		.field(
+			"Inline math",
+			"Include `$...$` in a message.\nManage server behavior with `/inline-math enabled:false`.",
+			false,
+		)
+		.field(
+			"Other commands",
+			"`/ast` · `/version` · `/source` · `/help`",
+			false,
+		)
+		.field(
+			"Detailed help",
+			"`@typst-bot help render` or `/help command:render`",
+			false,
+		)
 }
 
 /// Extracts the contents of a code block.
@@ -399,33 +454,169 @@ async fn render(
 	Ok(())
 }
 
+/// Render Typst code as an image.
+#[poise::command(slash_command, rename = "render")]
+async fn slash_render(
+	ctx: Context<'_>,
+	#[description = "Typst source code"] code: String,
+	#[description = "Preview, auto, or default page size"]
+	pagesize: Option<String>,
+	#[description = "Dark, light, or transparent theme"]
+	theme: Option<String>,
+) -> Result<(), PoiseError> {
+	let mut preamble = Preamble::default();
+	if let Some(pagesize) = pagesize {
+		preamble.page_size = pagesize.parse().map_err(|_| "invalid page size")?;
+	}
+	if let Some(theme) = theme {
+		preamble.theme = theme.parse().map_err(|_| "invalid theme")?;
+	}
+
+	let mut source = preamble.preamble();
+	source.push_str(&code);
+
+	let pool = &ctx.data().pool;
+	let (progress_send, _progress_recv) = mpsc::channel(4);
+	let res = pool.lock().await.render(source, progress_send).await;
+
+	match res {
+		Ok(res) => {
+			let controls = create_render_components(ctx.author().id);
+			let mut message = CreateReply::default()
+				.components(controls.components);
+
+			let mut content = format!("{}\n", render_attribution(ctx.author().id.get()));
+			if res.images.is_empty() {
+				writeln!(content, "Note: no pages generated").unwrap();
+			}
+			if res.more_pages > 0 {
+				writeln!(
+					content,
+					"Note: {} more page{} ignored",
+					res.more_pages,
+					if res.more_pages == 1 { "" } else { "s" },
+				)
+				.unwrap();
+			}
+			if !res.warnings.is_empty() {
+				writeln!(
+					content,
+					"Render succeeded with warnings:\n```ansi\n{}\n```",
+					sanitize_code_block(&res.warnings),
+				)
+				.unwrap();
+			}
+			message = message.content(content);
+
+			for (i, image) in res.images.into_iter().enumerate() {
+				message = message.attachment(CreateAttachment::bytes(
+					image,
+					format!("page-{}.png", i + 1),
+				));
+			}
+
+			let sent_message = ctx.send(message).await?;
+			let sent_message = sent_message.message().await?;
+			schedule_expiration(
+				ctx.serenity_context(),
+				sent_message.channel_id,
+				sent_message.id,
+				controls.expires_at,
+			);
+		}
+		Err(error) => {
+			let message = format!(
+				"An error occurred:\n```ansi\n{}\n```",
+				sanitize_code_block(&format!("{error:?}")),
+			);
+			ctx.reply(message).await?;
+		}
+	}
+
+	Ok(())
+}
+
 /// Show this menu.
 #[poise::command(prefix_command, track_edits, slash_command)]
 async fn help(
 	ctx: Context<'_>,
 	#[description = "Specific command to show help about"] command: Option<String>,
 ) -> Result<(), PoiseError> {
-	// Avoid the useless parameter list from `poise::builtins::help`.
-	if command.as_deref() == Some("render") {
-		// We prefer `reply` but `poise::builtins::help` uses `say`, so be consistent.
-		ctx
-			.say(format!("`@typst-bot render`\n\n{}", render_help()))
+	match normalize_help_command(command.as_deref()) {
+		None => ctx.send(CreateReply::default().embed(general_help_embed())).await?,
+		Some("render") => {
+			let embed = CreateEmbed::new()
+				.title("Render Typst")
+				.description("`/render code:<Typst>` or `@typst-bot render <code block>`")
+				.field(
+					"Page size",
+					"`preview/p` (default), `auto/a`, `default/d`",
+					true,
+				)
+				.field(
+					"Theme",
+					"`dark/d` (default), `light/l`, `transparent/t`",
+					true,
+				)
+				.field(
+					"Prefix alias",
+					"`@typst-bot r ps=<size> t=<theme> <code block>`",
+					false,
+				)
+				.field(
+					"Example",
+					"`/render code:#lorem(100) pagesize:auto theme:light`",
+					false,
+				);
+			ctx.send(CreateReply::default().embed(embed)).await?
+		}
+		Some("ast") => {
+			let embed = CreateEmbed::new()
+				.title("AST")
+				.description("`/ast` is prefix-only. `@typst-bot ast <code block>` prints the parsed syntax tree.")
+				.field(
+					"Example",
+					"`@typst-bot ast `= Heading`",
+					false,
+				);
+			ctx.send(CreateReply::default().embed(embed)).await?
+		}
+		Some("version") => ctx.send(CreateReply::default().embed(CreateEmbed::new().title("Version").description("`/version` or `@typst-bot version`\n\nShows the Typst version and bot build hash."))).await?,
+		Some("source") => ctx.send(CreateReply::default().embed(CreateEmbed::new().title("Source").description("`/source` or `@typst-bot source`\n\nLinks to the public source repository."))).await?,
+		Some("help") => ctx.send(CreateReply::default().embed(CreateEmbed::new().title("Help").description("`/help command:<command>` or `@typst-bot help [command]`\n\nShows detailed help for `render`, `ast`, `version`, `source`, or `help`.")).await?,
+		Some(command) => {
+			ctx.say(format!(
+				"Unknown command `{command}`.\nUse `@typst-bot help` to see available commands."
+			))
+			.await?
+		}
+	};
+	Ok(())
+}
+
+/// Enable or disable automatic inline-math rendering in this server.
+#[poise::command(slash_command)]
+async fn inline_math(
+	ctx: Context<'_>,
+	#[description = "Whether automatic inline-math rendering is enabled"] enabled: bool,
+) -> Result<(), PoiseError> {
+	let Some(guild_id) = ctx.guild_id() else {
+		ctx.reply("Inline-math settings are only available in servers.")
 			.await?;
 		return Ok(());
-	}
-
-	let config = poise::builtins::HelpConfiguration {
-		extra_text_at_bottom: "\
-Type @typst-bot help command for more info on a command.
-You can edit your message to the bot and the bot will edit its response.
-Commands prefixed with / can be used as slash commands and prefix commands.
-Commands prefixed with ? can only be used as prefix commands -- note that a mention of the bot must be used in place of the question mark due to Discord limitations.
-For ergonomics, you can probably autocomplete the mention with `@t<enter>` if the bot comes first in the list.
-The bot is written by mattf_. Feel free to reach out in the Typst Discord if you have any questions.
-",
-		..Default::default()
 	};
-	poise::builtins::help(ctx, command.as_deref(), config).await?;
+
+	ctx.data()
+		.inline_math_settings
+		.set_enabled(guild_id.get(), enabled)
+		.await;
+
+	ctx.reply(if enabled {
+		"Automatic inline-math rendering is enabled."
+	} else {
+		"Automatic inline-math rendering is disabled."
+	})
+	.await?;
 	Ok(())
 }
 
@@ -551,7 +742,41 @@ async fn handle_framework_event(
 	Ok(())
 }
 
-pub async fn run() {
+#[cfg(test)]
+mod tests {
+	use super::{general_help, normalize_help_command, render_help};
+
+	#[test]
+	fn general_help_lists_all_user_facing_features() {
+		let help = general_help();
+
+		assert!(help.contains("`render`"));
+		assert!(help.contains("`ast`"));
+		assert!(help.contains("`version`"));
+		assert!(help.contains("`source`"));
+		assert!(help.contains("$...$"));
+	}
+
+	#[test]
+	fn render_help_documents_the_available_flags_and_aliases() {
+		let help = render_help();
+
+		assert!(help.contains("pagesize"));
+		assert!(help.contains("theme"));
+		assert!(help.contains("preview"));
+		assert!(help.contains("transparent"));
+	}
+
+	#[test]
+	fn help_command_aliases_resolve_to_canonical_names() {
+		assert_eq!(normalize_help_command(Some("r")), Some("render"));
+		assert_eq!(normalize_help_command(Some("render")), Some("render"));
+		assert_eq!(normalize_help_command(None), None);
+		assert_eq!(normalize_help_command(Some("unknown")), Some("unknown"));
+	}
+}
+
+pub async fn run(inline_math_settings: InlineMathSettings) {
 	let token = match (std::env::var_os("DISCORD_TOKEN"), std::env::var_os("DISCORD_TOKEN_FILE")) {
 		(Some(token), None) => token.into_string().expect("`DISCORD_TOKEN` not UTF-8"),
 		(None, Some(path)) => std::fs::read_to_string(path).expect("reading from `DISCORD_TOKEN_FILE`"),
@@ -574,7 +799,9 @@ pub async fn run() {
 			},
 			commands: vec![
 				render(),
+				slash_render(),
 				help(),
+				inline_math(),
 				source(),
 				ast(),
 				version(),
@@ -595,7 +822,10 @@ pub async fn run() {
 		.setup(|ctx, _ready, framework| {
 			Box::pin(async move {
 				poise::builtins::register_globally(ctx, &framework.options().commands).await?;
-				Ok(Data { pool: Mutex::new(pool) })
+				Ok(Data {
+					pool: Mutex::new(pool),
+					inline_math_settings,
+				})
 			})
 		})
 		.build();

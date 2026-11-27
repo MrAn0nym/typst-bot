@@ -23,5 +23,9 @@ const SOURCE_URL: &str = "https://github.com/mattfbacon/typst-bot";
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-	tokio::join!(bot::run(), inline_math::run());
+	let inline_math_settings = inline_math::InlineMathSettings::from_environment();
+	tokio::join!(
+		bot::run(inline_math_settings.clone()),
+		inline_math::run(inline_math_settings),
+	);
 }

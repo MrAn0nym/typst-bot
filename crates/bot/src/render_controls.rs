@@ -55,6 +55,18 @@ pub(crate) fn create_components(
 	}
 }
 
+pub(crate) fn create_render_components(owner_id: UserId) -> RenderControls {
+	let expires_at = unix_time_secs() + CONTROL_LIFETIME_SECS;
+	let custom_id = format!("typst:v1:{expires_at}:{}:render", owner_id.get());
+
+	RenderControls {
+		components: vec![CreateActionRow::Buttons(vec![CreateButton::new(custom_id)
+			.style(ButtonStyle::Secondary)
+			.emoji(ReactionType::Unicode("🗑️".to_owned()))])],
+		expires_at,
+	}
+}
+
 fn component_custom_ids(
 	owner_id: u64,
 	channel_id: u64,
@@ -181,7 +193,8 @@ pub(crate) async fn handle_component_interaction(
 #[cfg(test)]
 mod tests {
 	use super::{
-		component_custom_ids, controls_expired, parse_component_id, render_attribution,
+		component_custom_ids, controls_expired, create_render_components, parse_component_id,
+		render_attribution,
 		ControlAction, ControlId, CONTROL_LIFETIME_SECS,
 	};
 
