@@ -1,8 +1,9 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serenity::all::{
-	ButtonStyle, ChannelId, ComponentInteraction, Context, CreateActionRow, CreateButton, CreateInteractionResponse,
-	CreateInteractionResponseMessage, EditInteractionResponse, EditMessage, MessageId, ReactionType, UserId,
+	ButtonStyle, ChannelId, ComponentInteraction, Context, CreateActionRow, CreateAttachment,
+	CreateButton, CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage,
+	EditInteractionResponse, EditMessage, MessageId, ReactionType, UserId,
 };
 
 const CONTROL_LIFETIME_SECS: u64 = 5 * 60;
@@ -10,6 +11,7 @@ const CONTROL_LIFETIME_SECS: u64 = 5 * 60;
 #[derive(Debug, PartialEq, Eq)]
 enum ControlAction {
 	DeleteRender,
+	PublishRender,
 	DeleteSource { channel_id: u64, message_id: u64 },
 }
 
@@ -67,6 +69,30 @@ pub(crate) fn create_render_components(owner_id: UserId) -> RenderControls {
 	}
 }
 
+pub(crate) fn create_private_render_components(owner_id: UserId) -> RenderControls {
+	let expires_at = unix_time_secs() + CONTROL_LIFETIME_SECS;
+	let (delete_render, publish_render) = private_component_custom_ids(owner_id.get(), expires_at);
+
+	RenderControls {
+		components: vec![CreateActionRow::Buttons(vec![
+			CreateButton::new(publish_render)
+				.style(ButtonStyle::Primary)
+				.label("Publish"),
+			CreateButton::new(delete_render)
+				.style(ButtonStyle::Secondary)
+				.emoji(ReactionType::Unicode("🗑️".to_owned())),
+		])],
+		expires_at,
+	}
+}
+
+fn private_component_custom_ids(owner_id: u64, expires_at: u64) -> (String, String) {
+	(
+		format!("typst:v1:{expires_at}:{owner_id}:render"),
+		format!("typst:v1:{expires_at}:{owner_id}:publish"),
+	)
+}
+
 fn component_custom_ids(
 	owner_id: u64,
 	channel_id: u64,
@@ -89,6 +115,7 @@ fn parse_component_id(custom_id: &str) -> Option<ControlId> {
 	let owner_id = parts.next()?.parse().ok()?;
 	let action = match parts.next()? {
 		"render" if parts.next().is_none() => ControlAction::DeleteRender,
+		"publish" if parts.next().is_none() => ControlAction::PublishRender,
 		"source" => {
 			let channel_id = parts.next()?.parse().ok()?;
 			let message_id = parts.next()?.parse().ok()?;
@@ -149,6 +176,60 @@ pub(crate) async fn handle_component_interaction(
 		return Ok(());
 	};
 
+	if controls_expired(control.expires_at, unix_time_secs()) {
+		return respond_ephemerally(ctx, interaction, "These render controls have expired.").await;
+	}
+	if interaction.user.id.get() != control.owner_id {
+		return respond_ephemerally(
+			ctx,
+			interaction,
+			"Only the user who created this render can use its controls.",
+		)
+		.await;
+	}
+
+	if control.action == ControlAction::PublishRender {
+		interaction
+			.create_response(
+				&ctx.http,
+				CreateInteractionResponse::UpdateMessage(
+					CreateInteractionResponseMessage::new()
+						.content("Publishing preview...")
+						.components(Vec::new()),
+				),
+			)
+			.await?;
+
+		let response = match publish_render(ctx, interaction).await {
+			Ok(()) => "Published to the channel.".to_owned(),
+			Err(error) => {
+				eprintln!("WARN Failed to publish private render: {error:?}");
+				let controls = create_private_render_components(interaction.user.id);
+				interaction
+					.edit_response(
+						&ctx.http,
+						EditInteractionResponse::new()
+							.content(
+								"Unable to publish this render. It remains private; please try again.",
+							)
+							.components(controls.components),
+					)
+					.await?;
+				return Ok(());
+			}
+		};
+
+		interaction
+			.edit_response(
+				&ctx.http,
+				EditInteractionResponse::new()
+					.content(response)
+					.components(Vec::new()),
+			)
+			.await?;
+		return Ok(());
+	}
+
 	interaction
 		.create_response(
 			&ctx.http,
@@ -158,29 +239,24 @@ pub(crate) async fn handle_component_interaction(
 		)
 		.await?;
 
-	let response = if controls_expired(control.expires_at, unix_time_secs()) {
-		"These render controls have expired.".to_owned()
-	} else if interaction.user.id.get() != control.owner_id {
-		"Only the user who created this render can use its controls.".to_owned()
-	} else {
-		let deletion = match control.action {
-			ControlAction::DeleteRender => interaction.message.delete(&ctx.http).await,
-			ControlAction::DeleteSource {
-				channel_id,
-				message_id,
-			} => {
-				ChannelId::new(channel_id)
-					.delete_message(&ctx.http, MessageId::new(message_id))
-					.await
-			}
-		};
+	let deletion = match control.action {
+		ControlAction::DeleteRender => interaction.message.delete(&ctx.http).await,
+		ControlAction::DeleteSource {
+			channel_id,
+			message_id,
+		} => {
+			ChannelId::new(channel_id)
+				.delete_message(&ctx.http, MessageId::new(message_id))
+				.await
+		}
+		ControlAction::PublishRender => unreachable!(),
+	};
 
-		match deletion {
-			Ok(()) => "Deleted.".to_owned(),
-			Err(error) => {
-				eprintln!("WARN Failed to delete a message using render controls: {error:?}");
-				"Unable to delete the message. Please check the bot's permissions.".to_owned()
-			}
+	let response = match deletion {
+		Ok(()) => "Deleted.".to_owned(),
+		Err(error) => {
+			eprintln!("WARN Failed to delete a message using render controls: {error:?}");
+			"Unable to delete the message. Please check the bot's permissions.".to_owned()
 		}
 	};
 
@@ -190,11 +266,52 @@ pub(crate) async fn handle_component_interaction(
 	Ok(())
 }
 
+async fn respond_ephemerally(
+	ctx: &Context,
+	interaction: &ComponentInteraction,
+	content: &str,
+) -> serenity::Result<()> {
+	interaction
+		.create_response(
+			&ctx.http,
+			CreateInteractionResponse::Defer(
+				CreateInteractionResponseMessage::new().ephemeral(true),
+			),
+		)
+		.await?;
+	interaction
+		.edit_response(&ctx.http, EditInteractionResponse::new().content(content))
+		.await?;
+	Ok(())
+}
+
+async fn publish_render(
+	ctx: &Context,
+	interaction: &ComponentInteraction,
+) -> serenity::Result<()> {
+	let controls = create_render_components(interaction.user.id);
+	let mut message = CreateMessage::new()
+		.content(interaction.message.content.clone())
+		.allowed_mentions(serenity::all::CreateAllowedMentions::new())
+		.components(controls.components);
+
+	for attachment in &interaction.message.attachments {
+		message = message.add_file(CreateAttachment::url(&ctx.http, &attachment.url).await?);
+	}
+
+	let published = interaction
+		.channel_id
+		.send_message(&ctx.http, message)
+		.await?;
+	schedule_expiration(ctx, published.channel_id, published.id, controls.expires_at);
+	Ok(())
+}
+
 #[cfg(test)]
 mod tests {
 	use super::{
-		component_custom_ids, controls_expired, parse_component_id, render_attribution,
-		ControlAction, ControlId, CONTROL_LIFETIME_SECS,
+		component_custom_ids, controls_expired, parse_component_id, private_component_custom_ids,
+		render_attribution, ControlAction, ControlId, CONTROL_LIFETIME_SECS,
 	};
 
 	#[test]
@@ -231,6 +348,24 @@ mod tests {
 	fn malformed_component_ids_are_ignored() {
 		assert_eq!(parse_component_id("typst:v1:bad"), None);
 		assert_eq!(parse_component_id("other:v1:500:42:render"), None);
+	}
+
+	#[test]
+	fn private_render_controls_include_owner_bound_publish_action() {
+		let (_, publish_id) = private_component_custom_ids(42, 500);
+
+		assert_eq!(
+			parse_component_id(&publish_id),
+			Some(ControlId {
+				owner_id: 42,
+				expires_at: 500,
+				action: ControlAction::PublishRender,
+			}),
+		);
+		assert_eq!(
+			parse_component_id("typst:v1:500:42:publish:extra"),
+			None,
+		);
 	}
 
 	#[test]

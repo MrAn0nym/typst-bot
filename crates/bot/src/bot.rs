@@ -18,8 +18,8 @@ use crate::conversion::{
 };
 use crate::inline_math::InlineMathSettings;
 use crate::render_controls::{
-	create_components, create_render_components, handle_component_interaction, render_attribution,
-	schedule_expiration,
+	create_components, create_private_render_components, create_render_components,
+	handle_component_interaction, render_attribution, schedule_expiration,
 };
 use crate::worker::Worker;
 use crate::SOURCE_URL;
@@ -212,6 +212,8 @@ fn render_help() -> String {
 Render Typst source as an image. Use `/render` with source in the `code` option, or run
 `?render [pagesize=<size>] [theme=<theme>] <code block>`.
 Prefix alias: `?r [ps=<size>] [t=<theme>] <code block>`.
+For a private preview, set `/render private_preview:true`; use its Publish button to share it
+in the channel.
 
 **Page size** — `pagesize` / `ps`
 - `preview` / `p` (default): 300pt wide, automatic height, 10pt margin
@@ -341,6 +343,7 @@ Render Typst documents and snippets directly in Discord.
 **Tips**
 - Edit or delete a prefix-command message and the bot will update or remove the response.
 - Render controls let the creator remove the render or source message for five minutes.
+- Use `/render private_preview:true` for a private preview with a Publish button.
 - Use `/help command:<name>` or `?help <name>` for command details."
 		.to_owned()
 }
@@ -538,6 +541,8 @@ async fn slash_render(
 	pagesize: Option<String>,
 	#[description = "Dark, light, or transparent theme"]
 	theme: Option<String>,
+	#[description = "Show the render privately with an option to publish it"]
+	private_preview: Option<bool>,
 ) -> Result<(), PoiseError> {
 	let mut preamble = Preamble::default();
 	if let Some(pagesize) = pagesize {
@@ -550,7 +555,12 @@ async fn slash_render(
 	let mut source = preamble.preamble();
 	source.push_str(&code);
 
-	ctx.defer().await?;
+	let private_preview = private_preview.unwrap_or(false);
+	if private_preview {
+		ctx.defer_ephemeral().await?;
+	} else {
+		ctx.defer().await?;
+	}
 
 	let pool = &ctx.data().pool;
 	let (progress_send, _progress_recv) = mpsc::channel(4);
@@ -558,7 +568,11 @@ async fn slash_render(
 
 	match res {
 		Ok(res) => {
-			let controls = create_render_components(ctx.author().id);
+			let controls = if private_preview {
+				create_private_render_components(ctx.author().id)
+			} else {
+				create_render_components(ctx.author().id)
+			};
 			let mut message = CreateReply::default()
 				.components(controls.components);
 
@@ -593,13 +607,15 @@ async fn slash_render(
 			}
 
 			let sent_message = ctx.send(message).await?;
-			let sent_message = sent_message.message().await?;
-			schedule_expiration(
-				ctx.serenity_context(),
-				sent_message.channel_id,
-				sent_message.id,
-				controls.expires_at,
-			);
+			if !private_preview {
+				let sent_message = sent_message.message().await?;
+				schedule_expiration(
+					ctx.serenity_context(),
+					sent_message.channel_id,
+					sent_message.id,
+					controls.expires_at,
+				);
+			}
 		}
 		Err(error) => {
 			let message = format!(
@@ -1024,6 +1040,7 @@ mod tests {
 		assert!(help.contains("`/version`"));
 		assert!(help.contains("`/source`"));
 		assert!(help.contains("`/inline-math enabled:"));
+    assert!(help.contains("private_preview:true"));
 		assert!(help.contains("$...$"));
 	}
 
@@ -1060,6 +1077,8 @@ mod tests {
 		assert!(help.contains("preview"));
 		assert!(help.contains("transparent"));
 		assert!(help.contains("`/render`"));
+		assert!(help.contains("private_preview:true"));
+		assert!(help.contains("Publish button"));
 	}
 
 	#[test]
