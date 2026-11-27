@@ -33,6 +33,7 @@ struct InlineMathHandler {
 #[derive(Clone, Default)]
 pub(crate) struct InlineMathSettings {
 	opt_out_guilds: Arc<RwLock<HashSet<u64>>>,
+	pending_source_deletions: Arc<Mutex<HashSet<(u64, u64)>>>,
 	persistence_path: Option<Arc<PathBuf>>,
 }
 
@@ -69,6 +70,7 @@ impl InlineMathSettings {
 
 		Self {
 			opt_out_guilds: Arc::new(RwLock::new(opt_out_guilds)),
+			pending_source_deletions: Arc::new(Mutex::new(HashSet::new())),
 			persistence_path: Some(Arc::new(persistence_path)),
 		}
 	}
@@ -94,6 +96,27 @@ impl InlineMathSettings {
 
 	pub(crate) async fn is_enabled(&self, guild_id: u64) -> bool {
 		!self.opt_out_guilds.read().await.contains(&guild_id)
+	}
+
+	pub(crate) async fn mark_source_deletion(&self, channel_id: u64, message_id: u64) {
+		self.pending_source_deletions
+			.lock()
+			.await
+			.insert((channel_id, message_id));
+	}
+
+	pub(crate) async fn cancel_source_deletion(&self, channel_id: u64, message_id: u64) {
+		self.pending_source_deletions
+			.lock()
+			.await
+			.remove(&(channel_id, message_id));
+	}
+
+	async fn consume_source_deletion(&self, channel_id: u64, message_id: u64) -> bool {
+		self.pending_source_deletions
+			.lock()
+			.await
+			.remove(&(channel_id, message_id))
 	}
 }
 
@@ -154,6 +177,20 @@ impl EventHandler for InlineMathHandler {
 		deleted_message_id: serenity::all::MessageId,
 		_guild_id: Option<serenity::all::GuildId>,
 	) {
+		if self
+			.settings
+			.consume_source_deletion(channel_id.get(), deleted_message_id.get())
+			.await
+		{
+			let mut rendered_messages = self.rendered_messages.lock().await;
+			remove_rendered_message(
+				&mut rendered_messages,
+				channel_id.get(),
+				deleted_message_id.get(),
+			);
+			return;
+		}
+
 		let rendered_ids = {
 			let mut rendered_messages = self.rendered_messages.lock().await;
 			remove_rendered_message(
@@ -176,7 +213,9 @@ impl EventHandler for InlineMathHandler {
 
 	async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
 		if let Interaction::Component(interaction) = interaction {
-			if let Err(error) = handle_component_interaction(&ctx, &interaction).await {
+			if let Err(error) =
+				handle_component_interaction(&ctx, &interaction, &self.settings).await
+			{
 				eprintln!("ERROR Failed to respond to inline-math render control: {error:?}");
 			}
 		}
@@ -222,8 +261,12 @@ impl InlineMathHandler {
 		let rendered = self.worker.lock().await.render(source, progress_sender).await;
 		let reply = match rendered {
 			Ok(rendered) if !rendered.images.is_empty() => {
-				let controls =
-					create_components(message.author.id, message.channel_id, message.id);
+				let controls = create_components(
+					message.author.id,
+					message.author.id,
+					message.channel_id,
+					message.id,
+				);
 				let expires_at = controls.expires_at;
 				let mut reply = CreateMessage::new()
 					.reference_message(message)
@@ -339,6 +382,20 @@ mod tests {
 		settings.set_enabled(42, false).await;
 		assert!(!settings.is_enabled(42).await);
 		assert!(settings.is_enabled(100).await);
+	}
+
+	#[tokio::test]
+	async fn source_deletion_controls_skip_inline_render_cleanup_once() {
+		let settings = InlineMathSettings::default();
+		let inline_settings = settings.clone();
+		settings.mark_source_deletion(1, 10).await;
+
+		assert!(inline_settings.consume_source_deletion(1, 10).await);
+		assert!(!settings.consume_source_deletion(1, 10).await);
+
+		settings.mark_source_deletion(1, 11).await;
+		settings.cancel_source_deletion(1, 11).await;
+		assert!(!settings.consume_source_deletion(1, 11).await);
 	}
 
 	#[tokio::test]
