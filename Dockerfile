@@ -19,9 +19,10 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates crates
 RUN cargo build --release --workspace --config git-fetch-with-cli=true
 
-# ============ Run Stage ============
-FROM debian:trixie-slim AS run
+RUN mkdir -p /runtime/cache /runtime/settings
 
+# ============ Run Stage ============
+FROM gcr.io/distroless/cc-debian13 AS run
 WORKDIR /bot
 CMD [ "/bot/typst-bot" ]
 
@@ -30,8 +31,7 @@ CMD [ "/bot/typst-bot" ]
 ENV CACHE_DIRECTORY=/bot/cache
 ENV SETTINGS_DIRECTORY=/bot/settings
 
-# Create the package cache and persistent settings directories.
-RUN mkdir -p /bot/cache /bot/settings
+COPY --from=builder /runtime/ ./
 
 # The only files we need from the build stage in order to run the bot are the two executables.
 COPY --from=builder \

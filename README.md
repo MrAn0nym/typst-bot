@@ -45,8 +45,9 @@ locations, set `TYPST_BOT_WORKER_PATH` to the worker executable.
 
 ## Docker setup
 
-The image includes both executables and default cache and settings directories. Supply
-the Discord token through the host environment:
+The image includes both executables and default cache and settings directories, using a
+minimal Debian runtime without a shell. Supply the Discord token through the host
+environment:
 
 ```sh
 export DISCORD_TOKEN='your-bot-token'
