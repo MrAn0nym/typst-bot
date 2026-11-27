@@ -12,13 +12,15 @@ services:
             DISCORD_TOKEN_FILE: /run/secrets/discord_token
         secrets:
             - discord_token
-        # The package cache is stored in a named volume.
+        # Package cache and bot settings use separate named volumes.
         volumes:
             - cache:/bot/cache
+            - settings:/bot/settings
 
-# The package cache is stored in a named volume managed by Docker.
+# Package cache and bot settings are stored in named volumes managed by Docker.
 volumes:
     cache:
+    settings:
 
 secrets:
     discord_token:

@@ -28,9 +28,10 @@ CMD [ "/bot/typst-bot" ]
 # These variables can get burned into the image without issue. We don't want `DISCORD_TOKEN` saved
 # in the image, though; it needs to come from the user (or from Compose) when the container is run.
 ENV CACHE_DIRECTORY=/bot/cache
+ENV SETTINGS_DIRECTORY=/bot/settings
 
-# Create the package cache directory.
-RUN mkdir -p /bot/cache
+# Create the package cache and persistent settings directories.
+RUN mkdir -p /bot/cache /bot/settings
 
 # The only files we need from the build stage in order to run the bot are the two executables.
 COPY --from=builder \

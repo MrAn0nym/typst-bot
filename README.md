@@ -21,11 +21,12 @@ To set up the working environment, create a directory with the following items:
 - `bot`: The bot binary, copied/hardlinked from the target directory after building. (This doesn't need to be in this directory, but having everything in one place simplifies things.)
 (Legacy note: you don't need `fonts` anymore because we use `typst-assets` now.)
 
-To run, CD into this directory, set `DISCORD_TOKEN` to your bot token, set `CACHE_DIRECTORY` to a suitable location, and run the `bot` binary (not the `worker` binary that's also in the directory).
+To run, CD into this directory, set `DISCORD_TOKEN` to your bot token, set `CACHE_DIRECTORY` to a package-cache location, optionally set `SETTINGS_DIRECTORY` to a persistent settings location, and run the `bot` binary (not the `worker` binary that's also in the directory).
 
 ### Docker
 
 There is a `Dockerfile` and `docker-compose.yml` for running the bot inside a Docker container.
+The Compose setup keeps package cache and bot settings in separate persistent named volumes.
 
 To set up the bot with Docker, create a `discord_token.txt` file containing your bot token and start the container with `docker compose up -d`.
 

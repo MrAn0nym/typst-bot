@@ -274,7 +274,7 @@ Render Typst documents and snippets directly in Discord.
 fn general_help_embed() -> CreateEmbed {
 	CreateEmbed::new()
 		.title("Typst Bot")
-		.description("Render Typst documents and snippets directly in Discord.")
+		.description(general_help())
 		.field(
 			"Render Typst",
 			"`/render` or `@typst-bot render <code block>`",
@@ -583,7 +583,15 @@ async fn help(
 		}
 		Some("version") => ctx.send(CreateReply::default().embed(CreateEmbed::new().title("Version").description("`/version` or `@typst-bot version`\n\nShows the Typst version and bot build hash."))).await?,
 		Some("source") => ctx.send(CreateReply::default().embed(CreateEmbed::new().title("Source").description("`/source` or `@typst-bot source`\n\nLinks to the public source repository."))).await?,
-		Some("help") => ctx.send(CreateReply::default().embed(CreateEmbed::new().title("Help").description("`/help command:<command>` or `@typst-bot help [command]`\n\nShows detailed help for `render`, `ast`, `version`, `source`, or `help`.")).await?,
+		Some("help") => {
+			let embed = CreateEmbed::new()
+				.title("Help")
+				.description(
+					"`/help command:<command>` or `@typst-bot help [command]`\n\n\
+					Shows detailed help for `render`, `ast`, `version`, `source`, or `help`.",
+				);
+			ctx.send(CreateReply::default().embed(embed)).await?
+		}
 		Some(command) => {
 			ctx.say(format!(
 				"Unknown command `{command}`.\nUse `@typst-bot help` to see available commands."

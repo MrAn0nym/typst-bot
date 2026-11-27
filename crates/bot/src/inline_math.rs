@@ -36,10 +36,20 @@ pub(crate) struct InlineMathSettings {
 
 impl InlineMathSettings {
 	pub(crate) fn from_environment() -> Self {
-		let Some(cache_directory) = std::env::var_os("CACHE_DIRECTORY") else {
+		let settings_directory = std::env::var_os("SETTINGS_DIRECTORY")
+			.or_else(|| std::env::var_os("CACHE_DIRECTORY"));
+		let Some(settings_directory) = settings_directory else {
 			return Self::default();
 		};
-		let persistence_path = PathBuf::from(cache_directory).join("inline_math_opt_outs.bin");
+
+		Self::from_directory(PathBuf::from(settings_directory))
+	}
+
+	fn from_directory(settings_directory: PathBuf) -> Self {
+		if let Err(error) = std::fs::create_dir_all(&settings_directory) {
+			tracing::warn!(?error, "Failed to create settings directory");
+		}
+		let persistence_path = settings_directory.join("inline_math_opt_outs.bin");
 		let opt_out_guilds = std::fs::read(&persistence_path)
 			.ok()
 			.and_then(|bytes| bincode::deserialize(&bytes).ok())
@@ -178,6 +188,7 @@ pub async fn run(settings: InlineMathSettings) {
 #[cfg(test)]
 mod tests {
 	use super::{source_for_message, InlineMathSettings, PREAMBLE};
+	use std::time::{SystemTime, UNIX_EPOCH};
 
 	#[test]
 	fn renders_the_entire_message_when_it_contains_a_dollar_sign() {
@@ -216,5 +227,26 @@ mod tests {
 		settings.set_enabled(42, false).await;
 		assert!(!settings.is_enabled(42).await);
 		assert!(settings.is_enabled(100).await);
+	}
+
+	#[tokio::test]
+	async fn guild_settings_persist_across_settings_instances() {
+		let unique = SystemTime::now()
+			.duration_since(UNIX_EPOCH)
+			.unwrap()
+			.as_nanos();
+		let directory = std::env::temp_dir().join(format!(
+			"typst-bot-inline-math-test-{}-{unique}",
+			std::process::id()
+		));
+		let settings = InlineMathSettings::from_directory(directory.clone());
+
+		settings.set_enabled(42, false).await;
+
+		let reloaded = InlineMathSettings::from_directory(directory.clone());
+		assert!(!reloaded.is_enabled(42).await);
+		assert!(reloaded.is_enabled(100).await);
+
+		_ = std::fs::remove_dir_all(directory);
 	}
 }
