@@ -6,17 +6,21 @@ use std::time::Duration;
 use poise::serenity_prelude::GatewayIntents;
 use poise::{async_trait, CreateReply};
 use protocol::VersionResponse;
-use serenity::all::{Context as SerenityContext, Interaction};
+use serenity::all::{Attachment, Context as SerenityContext, Interaction};
 use serenity::builder::{CreateAllowedMentions, CreateAttachment, CreateEmbed};
 use serenity::client::FullEvent;
 use tokio::join;
 use tokio::sync::{mpsc, Mutex};
 
+use crate::conversion::{
+	convert_document, decode_attachment, validate_attachment, validate_source, ConversionDirection,
+	ConversionInputError,
+};
+use crate::inline_math::InlineMathSettings;
 use crate::render_controls::{
 	create_components, create_private_render_components, create_render_components,
 	handle_component_interaction, render_attribution, schedule_expiration,
 };
-use crate::inline_math::InlineMathSettings;
 use crate::worker::Worker;
 use crate::SOURCE_URL;
 
@@ -297,8 +301,22 @@ fn help_command_help() -> String {
 Use `/help` to see the command overview, `/help command:<name>` for detailed command help,
 `?help` for the same overview, or `?help <name>` for details.
 
-Detailed help is available for `render`, `ast`, `version`, `source`, `inline_math`, and `help`."
+Detailed help is available for `render`, `ast`, `latex-to-typst`, `typst-to-latex`, `version`,
+`source`, `inline_math`, and `help`."
 		.to_owned()
+}
+
+fn conversion_help() -> String {
+	"\
+**Convert between Typst and LaTeX**
+Use `/latex-to-typst` with LaTeX source text or one attached `.tex` file, or
+`/typst-to-latex` with Typst source text or one attached `.typ` file. Text input returns
+converted text; file input returns a converted file. Inputs are limited to 1 MiB."
+		.to_owned()
+}
+
+fn inline_output_fits_discord(content: &str) -> bool {
+	content.chars().count() <= 2_000
 }
 
 fn general_help() -> String {
@@ -311,10 +329,12 @@ Render Typst documents and snippets directly in Discord.
 - Alias: `?r ```<Typst code>````
 - Slash command: `/render` with source in the `code` option
 - Inline math: include `$...$` in any message, for example `The value is $x^2$`.
+- Convert documents with `/latex-to-typst` or `/typst-to-latex`.
 
 **Commands**
 - `/render`, `?render`, `?r` — render Typst; use `/help command:render` for options and examples
 - `/ast`, `?ast` — show the parsed syntax tree
+- `/latex-to-typst`, `/typst-to-latex` — convert source text or attached `.tex` / `.typ` files
 - `/version`, `?version` — show the bot and Typst versions
 - `/source`, `?source` — open the bot's source repository
 - `/inline-math enabled:<true|false>` — manage automatic inline-math rendering in this server
@@ -344,7 +364,7 @@ fn general_help_embed() -> CreateEmbed {
 		)
 		.field(
 			"Other commands",
-			"`/ast` · `/version` · `/source` · `/inline-math` · `/help`",
+			"`/ast` · `/latex-to-typst` · `/typst-to-latex` · `/version` · `/source` · `/inline-math` · `/help`",
 			false,
 		)
 		.field(
@@ -629,6 +649,12 @@ async fn help(
 				.description(ast_help());
 			ctx.send(CreateReply::default().embed(embed)).await?
 		}
+		Some("latex-to-typst") | Some("typst-to-latex") => {
+			let embed = CreateEmbed::new()
+				.title("Convert Typst and LaTeX")
+				.description(conversion_help());
+			ctx.send(CreateReply::default().embed(embed)).await?
+		}
 		Some("version") => {
 			ctx.send(
 				CreateReply::default().embed(
@@ -777,6 +803,122 @@ async fn slash_ast(
 	respond_with_ast(ctx, code).await
 }
 
+async fn conversion_source(
+	direction: ConversionDirection,
+	source: Option<String>,
+	attachment: Option<Attachment>,
+) -> Result<(String, bool), ConversionInputError> {
+	match (source, attachment) {
+		(Some(_), Some(_)) => Err(ConversionInputError::MultipleSources),
+		(Some(source), None) => Ok((validate_source(source)?, false)),
+		(None, Some(attachment)) => {
+			validate_attachment(
+				direction,
+				&attachment.filename,
+				usize::try_from(attachment.size).unwrap_or(usize::MAX),
+			)?;
+			let bytes = attachment.download().await.map_err(|error| {
+				eprintln!("ERROR Failed to download conversion attachment: {error:?}");
+				ConversionInputError::AttachmentDownloadFailed
+			})?;
+			Ok((decode_attachment(bytes)?, true))
+		}
+		(None, None) => Err(ConversionInputError::MissingSource(
+			direction.input_extension(),
+		)),
+	}
+}
+
+async fn convert(
+	ctx: Context<'_>,
+	direction: ConversionDirection,
+	source: Option<String>,
+	attachment: Option<Attachment>,
+) -> Result<(), PoiseError> {
+	ctx.defer().await?;
+
+	let (source, is_attachment) = match conversion_source(direction, source, attachment).await {
+		Ok(source) => source,
+		Err(error) => {
+			ctx.say(error.to_string()).await?;
+			return Ok(());
+		}
+	};
+
+	let converted =
+		match tokio::task::spawn_blocking(move || convert_document(direction, &source)).await {
+			Ok(converted) if !converted.trim().is_empty() => converted,
+			Ok(_) => {
+				ctx
+					.say("Tylax did not produce output for this source.")
+					.await?;
+				return Ok(());
+			}
+			Err(error) => {
+				eprintln!("ERROR Tylax conversion task failed: {error:?}");
+				ctx
+					.say("Conversion failed unexpectedly. Please try again.")
+					.await?;
+				return Ok(());
+			}
+		};
+
+	if is_attachment {
+		ctx
+			.send(
+				CreateReply::default()
+					.content("Converted source:")
+					.attachment(CreateAttachment::bytes(
+						converted.into_bytes(),
+						direction.output_filename(),
+					)),
+			)
+			.await?;
+	} else {
+		let content = format!(
+			"```{}\n{}\n```",
+			direction.output_language(),
+			sanitize_code_block(&converted),
+		);
+		if inline_output_fits_discord(&content) {
+			ctx.say(content).await?;
+		} else {
+			ctx
+				.send(
+					CreateReply::default()
+						.content("Converted output is too long to display, so it is attached as a file.")
+						.attachment(CreateAttachment::bytes(
+							converted.into_bytes(),
+							direction.output_filename(),
+						)),
+				)
+				.await?;
+		}
+	}
+
+	Ok(())
+}
+
+/// Convert LaTeX source to Typst.
+#[poise::command(slash_command, rename = "latex-to-typst")]
+async fn latex_to_typst(
+	ctx: Context<'_>,
+	#[description = "LaTeX source text"] source: Option<String>,
+	#[description = "A .tex file to convert"] file: Option<Attachment>,
+) -> Result<(), PoiseError> {
+	convert(ctx, ConversionDirection::LatexToTypst, source, file).await
+}
+
+/// Convert Typst source to LaTeX.
+#[poise::command(slash_command, rename = "typst-to-latex")]
+async fn typst_to_latex(
+	ctx: Context<'_>,
+	#[description = "Typst source text"] source: Option<String>,
+	#[description = "A .typ file to convert"] file: Option<Attachment>,
+) -> Result<(), PoiseError> {
+	convert(ctx, ConversionDirection::TypstToLatex, source, file).await
+}
+
 /// Show the bot's Typst version.
 #[poise::command(prefix_command, slash_command)]
 async fn version(ctx: Context<'_>) -> Result<(), PoiseError> {
@@ -851,7 +993,7 @@ async fn handle_framework_event(
 
 #[cfg(test)]
 mod tests {
-	use super::{general_help, normalize_help_command, render_help};
+	use super::{conversion_help, general_help, normalize_help_command, render_help};
 
 	#[test]
 	fn ast_is_registered_as_a_slash_command() {
@@ -860,6 +1002,17 @@ mod tests {
 		assert_eq!(command.name, "ast");
 		assert!(command.slash_action.is_some());
 		assert!(super::ast().prefix_action.is_some());
+	}
+
+	#[test]
+	fn both_conversion_commands_are_registered_as_slash_commands() {
+		let latex_to_typst = super::latex_to_typst();
+		let typst_to_latex = super::typst_to_latex();
+
+		assert_eq!(latex_to_typst.name, "latex-to-typst");
+		assert!(latex_to_typst.slash_action.is_some());
+		assert_eq!(typst_to_latex.name, "typst-to-latex");
+		assert!(typst_to_latex.slash_action.is_some());
 	}
 
 	#[test]
@@ -882,11 +1035,29 @@ mod tests {
 
 		assert!(help.contains("`/render`"));
 		assert!(help.contains("`/ast`"));
+		assert!(help.contains("`/latex-to-typst`"));
+		assert!(help.contains("`/typst-to-latex`"));
 		assert!(help.contains("`/version`"));
 		assert!(help.contains("`/source`"));
 		assert!(help.contains("`/inline-math enabled:"));
-		assert!(help.contains("private_preview:true"));
+    assert!(help.contains("private_preview:true"));
 		assert!(help.contains("$...$"));
+	}
+
+	#[test]
+	fn inline_conversion_output_uses_files_when_it_exceeds_discord_limit() {
+		assert!(super::inline_output_fits_discord(&"x".repeat(2_000)));
+		assert!(!super::inline_output_fits_discord(&"x".repeat(2_001)));
+	}
+
+	#[test]
+	fn conversion_help_documents_both_input_modes_and_size_limit() {
+		let help = conversion_help();
+
+		assert!(help.contains("source text"));
+		assert!(help.contains("`.tex`"));
+		assert!(help.contains("`.typ`"));
+		assert!(help.contains("1 MiB"));
 	}
 
 	#[test]
@@ -945,6 +1116,8 @@ pub async fn run(inline_math_settings: InlineMathSettings) {
 				source(),
 				ast(),
 				slash_ast(),
+				latex_to_typst(),
+				typst_to_latex(),
 				version(),
 			],
 			allowed_mentions: Some(CreateAllowedMentions::new()),
