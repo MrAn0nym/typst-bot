@@ -1110,7 +1110,7 @@ mod tests {
 	fn message_context_menu_is_registered() {
 		let command = super::render_message();
 
-		assert_eq!(command.name, "Als Typst rendern");
+		assert_eq!(command.name, "render_message");
 		assert!(command.context_menu_action.is_some());
 	}
 
