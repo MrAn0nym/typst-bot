@@ -1,6 +1,6 @@
 # Typst Bot
 
-A Discord bot that renders [Typst](https://typst.app/) code.
+A Discord bot that renders [Typst](https://typst.app/) code and converts documents between Typst and LaTeX.
 
 The bot supports slash commands and renders messages containing `$` as inline math or
 full documents. Successful renders include buttons for deleting the output or source
@@ -26,6 +26,17 @@ Configuration is provided through environment variables:
 | `TYPST_BOT_WORKER_PATH` | No | Path to the worker executable; defaults to `./worker` |
 
 The bot rejects a missing or empty `DISCORD_TOKEN`. Do not create a token file.
+
+## Source conversion
+
+Use `/latex-to-typst` to convert LaTeX source or `/typst-to-latex` to convert Typst source.
+Each command accepts either pasted source text or one attached `.tex` / `.typ` file, up to
+1 MiB. Text input returns converted text; file input returns a converted file. If inline
+output exceeds Discord's message limit, it is returned as an attachment instead.
+
+Conversion runs locally through [Tylax](https://github.com/scipenai/tylax); source is not
+sent to an external conversion service. Tylax does not support every feature of either
+format, so some documents may need manual adjustments after conversion.
 
 ## Native setup
 
