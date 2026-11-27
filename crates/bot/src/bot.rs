@@ -778,7 +778,7 @@ async fn version(ctx: Context<'_>) -> Result<(), PoiseError> {
 		}) => {
 			let bot_hash = env!("BUILD_SHA");
 			let message = format!("\
-The bot was built from git hash [`{bot_hash}`](<https://github.com/mattfbacon/typst-bot/tree/{bot_hash}>)
+The bot was built from git hash [`{bot_hash}`](<https://github.com/MrAn0nym/typst-bot/tree/{bot_hash}>)
 The bot is using Typst [version **{typst_version}**](<https://github.com/typst/typst/releases/v{typst_version}>)\
 ");
 			ctx.reply(message).await?;

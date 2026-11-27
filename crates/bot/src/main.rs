@@ -19,7 +19,7 @@ mod inline_math;
 mod render_controls;
 mod worker;
 
-const SOURCE_URL: &str = "https://github.com/mattfbacon/typst-bot";
+const SOURCE_URL: &str = "https://github.com/MrAn0nym/typst-bot";
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
