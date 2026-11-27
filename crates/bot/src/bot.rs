@@ -205,8 +205,9 @@ fn render_help() -> String {
 	format!(
 		"\
 **Render Typst code**
-`@typst-bot render [pagesize=<size>] [theme=<theme>] <code block>`
-Alias: `@typst-bot r [ps=<size>] [t=<theme>] <code block>`
+Render Typst source as an image. Use `/render` with source in the `code` option, or run
+`?render [pagesize=<size>] [theme=<theme>] <code block>`.
+Prefix alias: `?r [ps=<size>] [t=<theme>] <code block>`.
 
 **Page size** — `pagesize` / `ps`
 - `preview` / `p` (default): 300pt wide, automatic height, 10pt margin
@@ -217,6 +218,7 @@ Alias: `@typst-bot r [ps=<size>] [t=<theme>] <code block>`
 - `dark` / `d` (default): Discord-dark background and text
 - `light` / `l`: white background
 - `transparent` / `t`: no page fill or text color override
+Slash options use the full values (`preview`, `auto`, `default`; `dark`, `light`, `transparent`).
 
 **Default preamble**
 ```
@@ -226,9 +228,9 @@ Use `pagesize=default theme=transparent` to remove the preamble.
 
 **Examples**
 ```
-@typst-bot render `hello, world!`
-@typst-bot r ps=a t=l `A small, light render`
-@typst-bot render pagesize=default theme=transparent ``‍`
+?render `hello, world!`
+?r ps=a t=l `A small, light render`
+?render pagesize=default theme=transparent ``‍`
 = Heading!
 
 And some text.
@@ -242,8 +244,57 @@ And some text.
 fn normalize_help_command(command: Option<&str>) -> Option<&str> {
 	match command {
 		Some("r") => Some("render"),
+		Some("inline-math") => Some("inline_math"),
 		command => command,
 	}
+}
+
+fn ast_help() -> String {
+	"\
+**Show the Typst syntax tree**
+Use `/ast` with Typst source in the `code` option, or run `?ast <code block>` with a prefix
+command. The parsed syntax tree is returned as formatted text.
+
+**Examples**
+```
+?ast `hello, world!`
+/ast code:hello, world!
+```"
+		.to_owned()
+}
+
+fn version_help() -> String {
+	"\
+**Show version information**
+Use `/version` or `?version` to show the bot's build hash and the Typst version it uses."
+		.to_owned()
+}
+
+fn source_help() -> String {
+	"\
+**Open the source repository**
+Use `/source` or `?source` to get a link to the bot's public source code."
+		.to_owned()
+}
+
+fn inline_math_help() -> String {
+	"\
+**Automatic inline-math rendering**
+Messages containing `$...$` are rendered automatically in servers where the feature is enabled.
+Use `/inline-math enabled:false` to disable it for this server, or
+`/inline-math enabled:true` to enable it again. The setting is server-specific and persists
+across restarts. This command is only available in servers."
+		.to_owned()
+}
+
+fn help_command_help() -> String {
+	"\
+**Get command help**
+Use `/help` to see the command overview, `/help command:<name>` for detailed command help,
+`?help` for the same overview, or `?help <name>` for details.
+
+Detailed help is available for `render`, `ast`, `version`, `source`, `inline_math`, and `help`."
+		.to_owned()
 }
 
 fn general_help() -> String {
@@ -252,22 +303,23 @@ fn general_help() -> String {
 Render Typst documents and snippets directly in Discord.
 
 **Quick start**
-- `@typst-bot render ```<Typst code>````
-- Alias: `@typst-bot r ```<Typst code>````
+- `?render ```<Typst code>````
+- Alias: `?r ```<Typst code>````
+- Slash command: `/render` with source in the `code` option
 - Inline math: include `$...$` in any message, for example `The value is $x^2$`.
 
 **Commands**
-- `render` / `r` — render Typst code; use `@typst-bot help render` for flags and examples
-- `ast` — show the parsed syntax tree for a code block
-- `version` — show the bot and Typst versions
-- `source` — open the bot's source repository
-- `help [command]` — show this menu or help for one command
+- `/render`, `?render`, `?r` — render Typst; use `/help command:render` for options and examples
+- `/ast`, `?ast` — show the parsed syntax tree
+- `/version`, `?version` — show the bot and Typst versions
+- `/source`, `?source` — open the bot's source repository
+- `/inline-math enabled:<true|false>` — manage automatic inline-math rendering in this server
+- `/help`, `?help` — show this menu or help for one command
 
 **Tips**
-- Edit or delete a command message and the bot will update or remove the response.
+- Edit or delete a prefix-command message and the bot will update or remove the response.
 - Render controls let the creator remove the render or source message for five minutes.
-- Use `/help`, `/source`, or `/version` for Discord slash commands.
-- For more detail: `@typst-bot help ast` or `@typst-bot help render`"
+- Use `/help command:<name>` or `?help <name>` for command details."
 		.to_owned()
 }
 
@@ -277,7 +329,7 @@ fn general_help_embed() -> CreateEmbed {
 		.description(general_help())
 		.field(
 			"Render Typst",
-			"`/render` or `@typst-bot render <code block>`",
+			"`/render` or `?render <code block>`",
 			false,
 		)
 		.field(
@@ -287,12 +339,12 @@ fn general_help_embed() -> CreateEmbed {
 		)
 		.field(
 			"Other commands",
-			"`/ast` · `/version` · `/source` · `/help`",
+			"`/ast` · `/version` · `/source` · `/inline-math` · `/help`",
 			false,
 		)
 		.field(
 			"Detailed help",
-			"`@typst-bot help render` or `/help command:render`",
+			"`?help render` or `/help command:render`",
 			false,
 		)
 }
@@ -547,54 +599,54 @@ async fn help(
 		Some("render") => {
 			let embed = CreateEmbed::new()
 				.title("Render Typst")
-				.description("`/render code:<Typst>` or `@typst-bot render <code block>`")
-				.field(
-					"Page size",
-					"`preview/p` (default), `auto/a`, `default/d`",
-					true,
-				)
-				.field(
-					"Theme",
-					"`dark/d` (default), `light/l`, `transparent/t`",
-					true,
-				)
-				.field(
-					"Prefix alias",
-					"`@typst-bot r ps=<size> t=<theme> <code block>`",
-					false,
-				)
-				.field(
-					"Example",
-					"`/render code:#lorem(100) pagesize:auto theme:light`",
-					false,
-				);
+				.description(render_help());
 			ctx.send(CreateReply::default().embed(embed)).await?
 		}
 		Some("ast") => {
 			let embed = CreateEmbed::new()
 				.title("AST")
-				.description("`/ast` is prefix-only. `@typst-bot ast <code block>` prints the parsed syntax tree.")
-				.field(
-					"Example",
-					"`@typst-bot ast `= Heading`",
-					false,
-				);
+				.description(ast_help());
 			ctx.send(CreateReply::default().embed(embed)).await?
 		}
-		Some("version") => ctx.send(CreateReply::default().embed(CreateEmbed::new().title("Version").description("`/version` or `@typst-bot version`\n\nShows the Typst version and bot build hash."))).await?,
-		Some("source") => ctx.send(CreateReply::default().embed(CreateEmbed::new().title("Source").description("`/source` or `@typst-bot source`\n\nLinks to the public source repository."))).await?,
+		Some("version") => {
+			ctx.send(
+				CreateReply::default().embed(
+					CreateEmbed::new()
+						.title("Version")
+						.description(version_help()),
+				),
+			)
+			.await?
+		}
+		Some("source") => {
+			ctx.send(
+				CreateReply::default().embed(
+					CreateEmbed::new()
+						.title("Source")
+						.description(source_help()),
+				),
+			)
+			.await?
+		}
+		Some("inline_math") => {
+			ctx.send(
+				CreateReply::default().embed(
+					CreateEmbed::new()
+						.title("Inline math")
+						.description(inline_math_help()),
+				),
+			)
+			.await?
+		}
 		Some("help") => {
 			let embed = CreateEmbed::new()
 				.title("Help")
-				.description(
-					"`/help command:<command>` or `@typst-bot help [command]`\n\n\
-					Shows detailed help for `render`, `ast`, `version`, `source`, or `help`.",
-				);
+				.description(help_command_help());
 			ctx.send(CreateReply::default().embed(embed)).await?
 		}
 		Some(command) => {
 			ctx.say(format!(
-				"Unknown command `{command}`.\nUse `@typst-bot help` to see available commands."
+				"Unknown command `{command}`.\nUse `/help` or `?help` to see available commands."
 			))
 			.await?
 		}
@@ -603,7 +655,7 @@ async fn help(
 }
 
 /// Enable or disable automatic inline-math rendering in this server.
-#[poise::command(slash_command)]
+#[poise::command(slash_command, rename = "inline-math")]
 async fn inline_math(
 	ctx: Context<'_>,
 	#[description = "Whether automatic inline-math rendering is enabled"] enabled: bool,
@@ -638,6 +690,7 @@ async fn source(ctx: Context<'_>) -> Result<(), PoiseError> {
 /// Get the AST for the given code.
 ///
 /// Syntax: `@typst-bot ast <code block> [...]`
+/// Use `/ast` with Typst source in the `code` option.
 ///
 /// **Examples**
 ///
@@ -662,9 +715,13 @@ async fn ast(
 	#[description = "Extra message content"]
 	_: Rest,
 ) -> Result<(), PoiseError> {
+	respond_with_ast(ctx, code.source).await
+}
+
+async fn respond_with_ast(ctx: Context<'_>, source: String) -> Result<(), PoiseError> {
 	let pool = &ctx.data().pool;
 
-	let res = pool.lock().await.ast(code.source).await;
+	let res = pool.lock().await.ast(source).await;
 
 	match res {
 		Ok(ast) => {
@@ -681,6 +738,15 @@ async fn ast(
 	}
 
 	Ok(())
+}
+
+/// Get the AST for the given Typst source.
+#[poise::command(slash_command, rename = "ast")]
+async fn slash_ast(
+	ctx: Context<'_>,
+	#[description = "Typst source code"] code: String,
+) -> Result<(), PoiseError> {
+	respond_with_ast(ctx, code).await
 }
 
 /// Show the bot's Typst version.
@@ -743,7 +809,7 @@ async fn handle_framework_event(
 	} = event
 	{
 		if let Err(error) = handle_component_interaction(ctx, interaction).await {
-			tracing::error!(?error, "Failed to respond to render control interaction");
+			eprintln!("ERROR Failed to respond to render control interaction: {error:?}");
 		}
 	}
 
@@ -755,6 +821,15 @@ mod tests {
 	use super::{general_help, normalize_help_command, render_help};
 
 	#[test]
+	fn ast_is_registered_as_a_slash_command() {
+		let command = super::slash_ast();
+
+		assert_eq!(command.name, "ast");
+		assert!(command.slash_action.is_some());
+		assert!(super::ast().prefix_action.is_some());
+	}
+
+	#[test]
 	fn general_help_lists_all_user_facing_features() {
 		let help = general_help();
 
@@ -762,7 +837,16 @@ mod tests {
 		assert!(help.contains("`ast`"));
 		assert!(help.contains("`version`"));
 		assert!(help.contains("`source`"));
+		assert!(help.contains("`/inline-math`"));
 		assert!(help.contains("$...$"));
+	}
+
+	#[test]
+	fn ast_help_explains_prefix_and_slash_usage() {
+		let help = super::ast_help();
+
+		assert!(help.contains("`/ast`"));
+		assert!(help.contains("`?ast <code block>`"));
 	}
 
 	#[test]
@@ -773,11 +857,13 @@ mod tests {
 		assert!(help.contains("theme"));
 		assert!(help.contains("preview"));
 		assert!(help.contains("transparent"));
+		assert!(help.contains("`/render`"));
 	}
 
 	#[test]
 	fn help_command_aliases_resolve_to_canonical_names() {
 		assert_eq!(normalize_help_command(Some("r")), Some("render"));
+		assert_eq!(normalize_help_command(Some("inline-math")), Some("inline_math"));
 		assert_eq!(normalize_help_command(Some("render")), Some("render"));
 		assert_eq!(normalize_help_command(None), None);
 		assert_eq!(normalize_help_command(Some("unknown")), Some("unknown"));
@@ -812,6 +898,7 @@ pub async fn run(inline_math_settings: InlineMathSettings) {
 				inline_math(),
 				source(),
 				ast(),
+				slash_ast(),
 				version(),
 			],
 			allowed_mentions: Some(CreateAllowedMentions::new()),
@@ -821,7 +908,7 @@ pub async fn run(inline_math_settings: InlineMathSettings) {
 			on_error: |error| {
 				Box::pin(async move {
 					if let Err(error) = handle_error(error).await {
-						tracing::error!(?error, "Error while handling error");
+						eprintln!("ERROR Failed while handling a framework error: {error:?}");
 					}
 				})
 			},

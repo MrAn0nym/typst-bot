@@ -136,7 +136,7 @@ pub(crate) fn schedule_expiration(
 			.edit_message(&http, message_id, EditMessage::new().components(Vec::new()))
 			.await
 		{
-			tracing::warn!(?error, "Failed to remove expired render controls");
+			eprintln!("WARN Failed to remove expired render controls: {error:?}");
 		}
 	});
 }
@@ -178,7 +178,7 @@ pub(crate) async fn handle_component_interaction(
 		match deletion {
 			Ok(()) => "Deleted.".to_owned(),
 			Err(error) => {
-				tracing::warn!(?error, "Failed to delete a message using render controls");
+				eprintln!("WARN Failed to delete a message using render controls: {error:?}");
 				"Unable to delete the message. Please check the bot's permissions.".to_owned()
 			}
 		}
@@ -193,8 +193,7 @@ pub(crate) async fn handle_component_interaction(
 #[cfg(test)]
 mod tests {
 	use super::{
-		component_custom_ids, controls_expired, create_render_components, parse_component_id,
-		render_attribution,
+		component_custom_ids, controls_expired, parse_component_id, render_attribution,
 		ControlAction, ControlId, CONTROL_LIFETIME_SECS,
 	};
 

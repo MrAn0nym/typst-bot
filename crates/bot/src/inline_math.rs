@@ -1,10 +1,11 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use poise::serenity_prelude::{GatewayIntents, Message};
 use serenity::all::{
 	Context, CreateAllowedMentions, CreateAttachment, CreateMessage, EventHandler, Interaction,
+	MessageUpdateEvent,
 };
 use tokio::sync::{mpsc, Mutex, RwLock};
 
@@ -26,6 +27,7 @@ const PREAMBLE: &str = concat!(
 struct InlineMathHandler {
 	worker: Mutex<Worker>,
 	settings: InlineMathSettings,
+	rendered_messages: Mutex<HashMap<(u64, u64), Vec<u64>>>,
 }
 
 #[derive(Clone, Default)]
@@ -47,13 +49,23 @@ impl InlineMathSettings {
 
 	fn from_directory(settings_directory: PathBuf) -> Self {
 		if let Err(error) = std::fs::create_dir_all(&settings_directory) {
-			tracing::warn!(?error, "Failed to create settings directory");
+			eprintln!("WARN Failed to create inline-math settings directory: {error:?}");
 		}
 		let persistence_path = settings_directory.join("inline_math_opt_outs.bin");
-		let opt_out_guilds = std::fs::read(&persistence_path)
-			.ok()
-			.and_then(|bytes| bincode::deserialize(&bytes).ok())
-			.unwrap_or_default();
+		let opt_out_guilds = match std::fs::read(&persistence_path) {
+			Ok(bytes) => match bincode::deserialize(&bytes) {
+				Ok(guilds) => guilds,
+				Err(error) => {
+					eprintln!("ERROR Failed to decode inline-math settings: {error:?}");
+					HashSet::new()
+				}
+			},
+			Err(error) if error.kind() == std::io::ErrorKind::NotFound => HashSet::new(),
+			Err(error) => {
+				eprintln!("ERROR Failed to read inline-math settings: {error:?}");
+				HashSet::new()
+			}
+		};
 
 		Self {
 			opt_out_guilds: Arc::new(RwLock::new(opt_out_guilds)),
@@ -72,10 +84,10 @@ impl InlineMathSettings {
 			match bincode::serialize(&*opt_out_guilds) {
 				Ok(bytes) => {
 					if let Err(error) = std::fs::write(path.as_ref(), bytes) {
-						tracing::warn!(?error, "Failed to persist inline-math settings");
+						eprintln!("ERROR Failed to persist inline-math settings: {error:?}");
 					}
 				}
-				Err(error) => tracing::warn!(?error, "Failed to encode inline-math settings"),
+				Err(error) => eprintln!("ERROR Failed to encode inline-math settings: {error:?}"),
 			}
 		}
 	}
@@ -89,64 +101,75 @@ fn source_for_message(content: &str) -> Option<String> {
 	content.contains('$').then(|| format!("{PREAMBLE}{content}"))
 }
 
+fn remove_rendered_message(
+	rendered_messages: &mut HashMap<(u64, u64), Vec<u64>>,
+	channel_id: u64,
+	message_id: u64,
+) -> Vec<u64> {
+	let rendered_ids = rendered_messages
+		.remove(&(channel_id, message_id))
+		.unwrap_or_default();
+
+	for remaining_ids in rendered_messages.values_mut() {
+		remaining_ids.retain(|rendered_id| *rendered_id != message_id);
+	}
+	rendered_messages.retain(|_, rendered_ids| !rendered_ids.is_empty());
+
+	rendered_ids
+}
+
 #[serenity::async_trait]
 impl EventHandler for InlineMathHandler {
 	async fn message(&self, ctx: Context, message: Message) {
-		if message.author.bot {
-			return;
-		}
+		self.process_message(&ctx, &message).await;
+	}
 
-		if let Some(guild_id) = message.guild_id {
-			if !self.settings.is_enabled(guild_id.get()).await {
-				return;
-			}
-		}
-
-		if let Some(source) = source_for_message(&message.content) {
-			let (progress_sender, _progress_receiver) = mpsc::channel(1);
-			let rendered = self.worker.lock().await.render(source, progress_sender).await;
-			match rendered {
-				Ok(rendered) if !rendered.images.is_empty() => {
-					let controls = create_components(message.author.id, message.channel_id, message.id);
-					let expires_at = controls.expires_at;
-					let mut reply = CreateMessage::new()
-						.reference_message(&message)
-						.content(render_attribution(message.author.id.get()))
-						.allowed_mentions(CreateAllowedMentions::new())
-						.components(controls.components);
-					for (index, image) in rendered.images.into_iter().enumerate() {
-						reply = reply.add_file(CreateAttachment::bytes(
-							image,
-							format!("page-{}.png", index + 1),
-						));
-					}
-					match message.channel_id.send_message(&ctx.http, reply).await {
-						Ok(render_message) => schedule_expiration(
-							&ctx,
-							render_message.channel_id,
-							render_message.id,
-							expires_at,
-						),
-						Err(error) => tracing::error!(?error, "Failed to send inline math render"),
-					}
-				}
-				Ok(_) => {
-					let reply = CreateMessage::new()
-						.reference_message(&message)
-						.content("The message rendered without producing any pages.");
-					if let Err(error) = message.channel_id.send_message(&ctx.http, reply).await {
-						tracing::error!(?error, "Failed to send empty inline math render response");
-					}
-				}
+	async fn message_update(
+		&self,
+		ctx: Context,
+		_old_if_available: Option<Message>,
+		new: Option<Message>,
+		event: MessageUpdateEvent,
+	) {
+		let message = match new {
+			Some(message) => message,
+			None => match event.channel_id.message(&ctx.http, event.id).await {
+				Ok(message) => message,
 				Err(error) => {
-					tracing::warn!(?error, "Failed to render inline math");
-					let reply = CreateMessage::new()
-						.reference_message(&message)
-						.content(format!("Failed to render message: {error}"));
-					if let Err(error) = message.channel_id.send_message(&ctx.http, reply).await {
-						tracing::error!(?error, "Failed to send inline math render error");
-					}
+					eprintln!(
+						"ERROR Failed to fetch updated message {} in channel {}: {error:?}",
+						event.id, event.channel_id
+					);
+					return;
 				}
+			},
+		};
+		self.process_message(&ctx, &message).await;
+	}
+
+	async fn message_delete(
+		&self,
+		ctx: Context,
+		channel_id: serenity::all::ChannelId,
+		deleted_message_id: serenity::all::MessageId,
+		_guild_id: Option<serenity::all::GuildId>,
+	) {
+		let rendered_ids = {
+			let mut rendered_messages = self.rendered_messages.lock().await;
+			remove_rendered_message(
+				&mut rendered_messages,
+				channel_id.get(),
+				deleted_message_id.get(),
+			)
+		};
+		for rendered_id in rendered_ids {
+			if let Err(error) = channel_id
+				.delete_message(&ctx.http, serenity::all::MessageId::new(rendered_id))
+				.await
+			{
+				eprintln!(
+					"ERROR Failed to delete inline-math render {rendered_id} after source deletion: {error:?}"
+				);
 			}
 		}
 	}
@@ -154,8 +177,100 @@ impl EventHandler for InlineMathHandler {
 	async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
 		if let Interaction::Component(interaction) = interaction {
 			if let Err(error) = handle_component_interaction(&ctx, &interaction).await {
-				tracing::error!(?error, "Failed to respond to render control interaction");
+				eprintln!("ERROR Failed to respond to inline-math render control: {error:?}");
 			}
+		}
+	}
+}
+
+impl InlineMathHandler {
+	async fn process_message(&self, ctx: &Context, message: &Message) {
+		if message.author.bot {
+			return;
+		}
+
+		let source_key = (message.channel_id.get(), message.id.get());
+		let mut rendered_messages = self.rendered_messages.lock().await;
+		let previous_ids = rendered_messages.remove(&source_key).unwrap_or_default();
+		let mut failed_deletions = Vec::new();
+		for rendered_id in previous_ids {
+			if let Err(error) = message
+				.channel_id
+				.delete_message(&ctx.http, serenity::all::MessageId::new(rendered_id))
+				.await
+			{
+				eprintln!(
+					"ERROR Failed to remove previous inline-math render {rendered_id}: {error:?}"
+				);
+				failed_deletions.push(rendered_id);
+			}
+		}
+		if !failed_deletions.is_empty() {
+			rendered_messages.insert(source_key, failed_deletions);
+		}
+
+		if let Some(guild_id) = message.guild_id {
+			if !self.settings.is_enabled(guild_id.get()).await {
+				return;
+			}
+		}
+		let Some(source) = source_for_message(&message.content) else {
+			return;
+		};
+
+		let (progress_sender, _progress_receiver) = mpsc::channel(1);
+		let rendered = self.worker.lock().await.render(source, progress_sender).await;
+		let reply = match rendered {
+			Ok(rendered) if !rendered.images.is_empty() => {
+				let controls =
+					create_components(message.author.id, message.channel_id, message.id);
+				let expires_at = controls.expires_at;
+				let mut reply = CreateMessage::new()
+					.reference_message(message)
+					.content(render_attribution(message.author.id.get()))
+					.allowed_mentions(CreateAllowedMentions::new())
+					.components(controls.components);
+				for (index, image) in rendered.images.into_iter().enumerate() {
+					reply = reply.add_file(CreateAttachment::bytes(
+						image,
+						format!("page-{}.png", index + 1),
+					));
+				}
+
+				match message.channel_id.send_message(&ctx.http, reply).await {
+					Ok(render_message) => {
+						rendered_messages
+							.entry(source_key)
+							.or_default()
+							.push(render_message.id.get());
+						schedule_expiration(
+							ctx,
+							render_message.channel_id,
+							render_message.id,
+							expires_at,
+						);
+					}
+					Err(error) => eprintln!("ERROR Failed to send inline-math render: {error:?}"),
+				}
+				return;
+			}
+			Ok(_) => CreateMessage::new()
+				.reference_message(message)
+				.content("The message rendered without producing any pages."),
+			Err(error) => {
+				eprintln!("ERROR Failed to render inline math: {error:?}");
+				CreateMessage::new()
+					.reference_message(message)
+					.content(format!("Failed to render message: {error}"))
+			}
+		};
+
+		match message.channel_id.send_message(&ctx.http, reply).await {
+			Ok(response) => rendered_messages
+				.entry(source_key)
+				.or_default()
+				.push(response.id.get()),
+			Err(error) => eprintln!("ERROR Failed to send inline-math response: {error:?}"),
 		}
 	}
 }
@@ -171,6 +286,7 @@ pub async fn run(settings: InlineMathSettings) {
 	let handler = InlineMathHandler {
 		worker: Mutex::new(Worker::spawn().await.expect("spawning Typst worker")),
 		settings,
+		rendered_messages: Mutex::new(HashMap::new()),
 	};
 	let intents = GatewayIntents::GUILD_MESSAGES
 		| GatewayIntents::DIRECT_MESSAGES
@@ -181,13 +297,14 @@ pub async fn run(settings: InlineMathSettings) {
 		.expect("creating inline math Discord client");
 
 	if let Err(error) = client.start().await {
-		tracing::error!(?error, "Inline math Discord client stopped");
+		eprintln!("ERROR Inline-math Discord client stopped: {error:?}");
 	}
 }
 
 #[cfg(test)]
 mod tests {
-	use super::{source_for_message, InlineMathSettings, PREAMBLE};
+	use super::{remove_rendered_message, source_for_message, InlineMathSettings, PREAMBLE};
+	use std::collections::HashMap;
 	use std::time::{SystemTime, UNIX_EPOCH};
 
 	#[test]
@@ -248,5 +365,17 @@ mod tests {
 		assert!(reloaded.is_enabled(100).await);
 
 		_ = std::fs::remove_dir_all(directory);
+	}
+
+	#[test]
+	fn deleting_a_source_returns_its_renders_and_forgets_deleted_render_ids() {
+		let mut rendered = HashMap::from([
+			((1, 10), vec![20, 21]),
+			((1, 11), vec![22]),
+		]);
+
+		assert_eq!(remove_rendered_message(&mut rendered, 1, 10), vec![20, 21]);
+		assert_eq!(remove_rendered_message(&mut rendered, 1, 22), Vec::<u64>::new());
+		assert!(rendered.is_empty());
 	}
 }
