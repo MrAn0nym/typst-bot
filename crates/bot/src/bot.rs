@@ -244,6 +244,8 @@ And some text.
 fn normalize_help_command(command: Option<&str>) -> Option<&str> {
 	match command {
 		Some("r") => Some("render"),
+		Some("render-prefix") => Some("render"),
+		Some("ast-prefix") => Some("ast"),
 		Some("inline-math") => Some("inline_math"),
 		command => command,
 	}
@@ -410,7 +412,8 @@ impl<'a> poise::PopArgument<'a> for Rest {
 	broadcast_typing,
 	user_cooldown = 1,
 	help_text_fn = "render_help",
-	aliases("r")
+	rename = "render-prefix",
+	aliases("render", "r")
 )]
 async fn render(
 	ctx: Context<'_>,
@@ -709,7 +712,13 @@ async fn source(ctx: Context<'_>) -> Result<(), PoiseError> {
 ///
 /// @typst-bot ast `#((3): 4)` Interesting parse result here.
 /// ```
-#[poise::command(prefix_command, track_edits, broadcast_typing)]
+#[poise::command(
+	prefix_command,
+	track_edits,
+	broadcast_typing,
+	rename = "ast-prefix",
+	aliases("ast")
+)]
 async fn ast(
 	ctx: Context<'_>,
 	#[description = "Code to parse"] code: CodeBlock,
@@ -790,7 +799,8 @@ async fn handle_error(
 		ctx, input, error, ..
 	} = error
 	{
-		let name = &ctx.command().name;
+		let command_name = &ctx.command().name;
+		let name = normalize_help_command(Some(command_name)).unwrap_or(command_name);
 		let usage = format!(
 			"Use `@typst-bot help {name}` for usage. Feel free to edit or delete your message and the bot will react.",
 		);
@@ -837,6 +847,20 @@ mod tests {
 	}
 
 	#[test]
+	fn prefix_and_slash_commands_with_shared_user_names_have_distinct_dispatch_names() {
+		let prefix_render = super::render();
+		let slash_render = super::slash_render();
+		let prefix_ast = super::ast();
+		let slash_ast = super::slash_ast();
+
+		assert_ne!(prefix_render.name, slash_render.name);
+		assert!(prefix_render.aliases.iter().any(|alias| alias == "render"));
+		assert!(prefix_render.aliases.iter().any(|alias| alias == "r"));
+		assert_ne!(prefix_ast.name, slash_ast.name);
+		assert!(prefix_ast.aliases.iter().any(|alias| alias == "ast"));
+	}
+
+	#[test]
 	fn general_help_lists_all_user_facing_features() {
 		let help = general_help();
 
@@ -870,6 +894,8 @@ mod tests {
 	#[test]
 	fn help_command_aliases_resolve_to_canonical_names() {
 		assert_eq!(normalize_help_command(Some("r")), Some("render"));
+		assert_eq!(normalize_help_command(Some("render-prefix")), Some("render"));
+		assert_eq!(normalize_help_command(Some("ast-prefix")), Some("ast"));
 		assert_eq!(normalize_help_command(Some("inline-math")), Some("inline_math"));
 		assert_eq!(normalize_help_command(Some("render")), Some("render"));
 		assert_eq!(normalize_help_command(None), None);
