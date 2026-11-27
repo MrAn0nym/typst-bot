@@ -6,7 +6,10 @@ use std::time::Duration;
 use poise::serenity_prelude::GatewayIntents;
 use poise::{async_trait, CreateReply};
 use protocol::VersionResponse;
-use serenity::all::{Attachment, Context as SerenityContext, Interaction, Message};
+use serenity::all::{
+	Attachment, Channel, ChannelId, ChannelType, Context as SerenityContext, Interaction, Message,
+	Permissions,
+};
 use serenity::builder::{CreateAllowedMentions, CreateAttachment, CreateEmbed};
 use serenity::client::FullEvent;
 use tokio::join;
@@ -214,6 +217,7 @@ Render Typst source as an image. Use `/render` with source in the `code` option,
 Prefix alias: `?r [ps=<size>] [t=<theme>] <code block>`.
 For a private preview, set `/render private_preview:true`; use its Publish button to share it
 in the channel.
+The message context menu only works when you can send messages in that channel.
 
 **Page size** — `pagesize` / `ps`
 - `preview` / `p` (default): 300pt wide, automatic height, 10pt margin
@@ -344,7 +348,8 @@ Render Typst documents and snippets directly in Discord.
 
 **Tips**
 - Edit or delete a prefix-command message and the bot will update or remove the response.
-- Render controls let the creator remove the render or source message for five minutes.
+- Render controls let the creator remove the render for five minutes; source deletion is only
+  available for messages they authored, and both delete actions require confirmation.
 - Use `/render private_preview:true` for a private preview with a Publish button.
 - Use `/help command:<name>` or `?help <name>` for command details."
 		.to_owned()
@@ -473,7 +478,12 @@ async fn render(
 				poise::Context::Prefix(prefix) => (prefix.msg.channel_id, prefix.msg.id),
 				poise::Context::Application(_) => unreachable!("render is a prefix command"),
 			};
-			let controls = create_components(ctx.author().id, source_channel_id, source_message_id);
+			let controls = create_components(
+				ctx.author().id,
+				ctx.author().id,
+				source_channel_id,
+				source_message_id,
+			);
 			let expires_at = controls.expires_at;
 			let mut message = CreateReply::default()
 				.reply(true)
@@ -664,6 +674,19 @@ fn normalize_context_menu_source(content: &str) -> Option<String> {
 /// Render the text or code block of a message as Typst.
 #[poise::command(context_menu_command = "Als Typst rendern")]
 async fn render_message(ctx: Context<'_>, message: Message) -> Result<(), PoiseError> {
+	let can_write = can_write_in_channel(ctx, message.channel_id).await?;
+	if !can_write {
+		ctx.send(
+			CreateReply::default()
+				.content(
+					"You need permission to send messages in that channel to render its messages.",
+				)
+				.ephemeral(true),
+		)
+		.await?;
+		return Ok(());
+	}
+
 	let Some(source) = context_menu_source(&message) else {
 		ctx.reply("The selected message does not contain any text to render.")
 			.await?;
@@ -685,7 +708,12 @@ async fn render_message(ctx: Context<'_>, message: Message) -> Result<(), PoiseE
 
 	match res {
 		Ok(res) => {
-			let controls = create_components(ctx.author().id, message.channel_id, message.id);
+			let controls = create_components(
+				ctx.author().id,
+				message.author.id,
+				message.channel_id,
+				message.id,
+			);
 			let mut message_reply = CreateReply::default()
 				.components(controls.components);
 
@@ -738,6 +766,39 @@ async fn render_message(ctx: Context<'_>, message: Message) -> Result<(), PoiseE
 	}
 
 	Ok(())
+}
+
+async fn can_write_in_channel(
+	ctx: Context<'_>,
+	channel_id: ChannelId,
+) -> Result<bool, PoiseError> {
+	let channel = channel_id.to_channel(ctx.serenity_context()).await?;
+	Ok(match channel {
+		Channel::Private(_) => true,
+		Channel::Guild(channel) => {
+			let Some(member) = ctx.author_member().await else {
+				return Ok(false);
+			};
+			let guild = ctx
+				.serenity_context()
+				.cache
+				.guild(channel.guild_id)
+				.ok_or("Guild permissions are unavailable")?;
+			let permissions = guild.user_permissions_in(&channel, member.as_ref());
+			let required_permission = if matches!(
+				channel.kind,
+				ChannelType::PublicThread
+					| ChannelType::PrivateThread
+					| ChannelType::NewsThread
+			) {
+				Permissions::SEND_MESSAGES_IN_THREADS
+			} else {
+				Permissions::SEND_MESSAGES
+			};
+			permissions.contains(required_permission)
+		}
+		_ => false,
+	})
 }
 
 /// Show this menu.
@@ -1088,13 +1149,15 @@ async fn handle_framework_event(
 	ctx: &SerenityContext,
 	event: &FullEvent,
 	_framework: poise::FrameworkContext<'_, Data, PoiseError>,
-	_data: &Data,
+	data: &Data,
 ) -> Result<(), PoiseError> {
 	if let FullEvent::InteractionCreate {
 		interaction: Interaction::Component(interaction),
 	} = event
 	{
-		if let Err(error) = handle_component_interaction(ctx, interaction).await {
+		if let Err(error) =
+			handle_component_interaction(ctx, interaction, &data.inline_math_settings).await
+		{
 			eprintln!("ERROR Failed to respond to render control interaction: {error:?}");
 		}
 	}

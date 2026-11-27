@@ -6,6 +6,8 @@ use serenity::all::{
 	EditInteractionResponse, EditMessage, MessageId, ReactionType, UserId,
 };
 
+use crate::inline_math::InlineMathSettings;
+
 const CONTROL_LIFETIME_SECS: u64 = 5 * 60;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -13,6 +15,9 @@ enum ControlAction {
 	DeleteRender,
 	PublishRender,
 	DeleteSource { channel_id: u64, message_id: u64 },
+	ConfirmDeleteRender { channel_id: u64, message_id: u64 },
+	ConfirmDeleteSource { channel_id: u64, message_id: u64 },
+	CancelDeletion,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -33,26 +38,35 @@ pub(crate) fn render_attribution(user_id: u64) -> String {
 
 pub(crate) fn create_components(
 	owner_id: UserId,
+	source_author_id: UserId,
 	source_channel_id: ChannelId,
 	source_message_id: MessageId,
 ) -> RenderControls {
 	let expires_at = unix_time_secs() + CONTROL_LIFETIME_SECS;
-	let (delete_render, delete_source) = component_custom_ids(
-		owner_id.get(),
-		source_channel_id.get(),
-		source_message_id.get(),
-		expires_at,
-	);
+	let delete_render = format!("typst:v1:{expires_at}:{}:render", owner_id.get());
+	let mut buttons = vec![
+		CreateButton::new(delete_render)
+			.style(ButtonStyle::Secondary)
+			.emoji(ReactionType::Unicode("🗑️".to_owned())),
+	];
 
-	RenderControls {
-		components: vec![CreateActionRow::Buttons(vec![
-			CreateButton::new(delete_render)
-				.style(ButtonStyle::Secondary)
-				.emoji(ReactionType::Unicode("🗑️".to_owned())),
+	if owner_id == source_author_id {
+		let delete_source = component_custom_ids(
+			owner_id.get(),
+			source_channel_id.get(),
+			source_message_id.get(),
+			expires_at,
+		)
+		.1;
+		buttons.push(
 			CreateButton::new(delete_source)
 				.style(ButtonStyle::Secondary)
 				.emoji(ReactionType::Unicode("📜".to_owned())),
-		])],
+		);
+	}
+
+	RenderControls {
+		components: vec![CreateActionRow::Buttons(buttons)],
 		expires_at,
 	}
 }
@@ -116,6 +130,7 @@ fn parse_component_id(custom_id: &str) -> Option<ControlId> {
 	let action = match parts.next()? {
 		"render" if parts.next().is_none() => ControlAction::DeleteRender,
 		"publish" if parts.next().is_none() => ControlAction::PublishRender,
+		"cancel" if parts.next().is_none() => ControlAction::CancelDeletion,
 		"source" => {
 			let channel_id = parts.next()?.parse().ok()?;
 			let message_id = parts.next()?.parse().ok()?;
@@ -123,6 +138,28 @@ fn parse_component_id(custom_id: &str) -> Option<ControlId> {
 				return None;
 			}
 			ControlAction::DeleteSource {
+				channel_id,
+				message_id,
+			}
+		}
+		"confirm-render" => {
+			let channel_id = parts.next()?.parse().ok()?;
+			let message_id = parts.next()?.parse().ok()?;
+			if parts.next().is_some() {
+				return None;
+			}
+			ControlAction::ConfirmDeleteRender {
+				channel_id,
+				message_id,
+			}
+		}
+		"confirm-source" => {
+			let channel_id = parts.next()?.parse().ok()?;
+			let message_id = parts.next()?.parse().ok()?;
+			if parts.next().is_some() {
+				return None;
+			}
+			ControlAction::ConfirmDeleteSource {
 				channel_id,
 				message_id,
 			}
@@ -171,6 +208,7 @@ pub(crate) fn schedule_expiration(
 pub(crate) async fn handle_component_interaction(
 	ctx: &Context,
 	interaction: &ComponentInteraction,
+	inline_math_settings: &InlineMathSettings,
 ) -> serenity::Result<()> {
 	let Some(control) = parse_component_id(&interaction.data.custom_id) else {
 		return Ok(());
@@ -230,6 +268,99 @@ pub(crate) async fn handle_component_interaction(
 		return Ok(());
 	}
 
+	match &control.action {
+		ControlAction::DeleteRender => {
+			let confirm_id = format!(
+				"typst:v1:{}:{}:confirm-render:{}:{}",
+				control.expires_at,
+				control.owner_id,
+				interaction.channel_id.get(),
+				interaction.message.id.get(),
+			);
+			return prompt_deletion_confirmation(
+				ctx,
+				interaction,
+				"Are you sure you want to delete this render?",
+				confirm_id,
+				control.owner_id,
+				control.expires_at,
+				false,
+			)
+			.await;
+		}
+		ControlAction::DeleteSource {
+			channel_id,
+			message_id,
+		} => {
+			interaction
+				.create_response(
+					&ctx.http,
+					CreateInteractionResponse::Defer(
+						CreateInteractionResponseMessage::new().ephemeral(true),
+					),
+				)
+				.await?;
+			let source_message = match ChannelId::new(*channel_id)
+				.message(&ctx.http, MessageId::new(*message_id))
+				.await
+			{
+				Ok(message) => message,
+				Err(error) => {
+					eprintln!("WARN Failed to validate source message for deletion: {error:?}");
+					interaction
+						.edit_response(
+							&ctx.http,
+							EditInteractionResponse::new()
+								.content("Unable to verify the original message."),
+						)
+						.await?;
+					return Ok(());
+				}
+			};
+			if source_message.author.id.get() != control.owner_id {
+				interaction
+					.edit_response(
+						&ctx.http,
+						EditInteractionResponse::new()
+							.content("You can only delete messages that you authored."),
+					)
+					.await?;
+				return Ok(());
+			}
+
+			let confirm_id = format!(
+				"typst:v1:{}:{}:confirm-source:{channel_id}:{message_id}",
+				control.expires_at, control.owner_id,
+			);
+			return prompt_deletion_confirmation(
+				ctx,
+				interaction,
+				"Are you sure you want to delete the original message?",
+				confirm_id,
+				control.owner_id,
+				control.expires_at,
+				true,
+			)
+			.await;
+		}
+		ControlAction::CancelDeletion => {
+			interaction
+				.create_response(
+					&ctx.http,
+					CreateInteractionResponse::UpdateMessage(
+						CreateInteractionResponseMessage::new()
+							.content("Deletion cancelled.")
+							.components(Vec::new()),
+					),
+				)
+				.await?;
+			return Ok(());
+		}
+		ControlAction::ConfirmDeleteRender { .. }
+		| ControlAction::ConfirmDeleteSource { .. } => {}
+		ControlAction::PublishRender => unreachable!(),
+	}
+
 	interaction
 		.create_response(
 			&ctx.http,
@@ -240,16 +371,30 @@ pub(crate) async fn handle_component_interaction(
 		.await?;
 
 	let deletion = match control.action {
-		ControlAction::DeleteRender => interaction.message.delete(&ctx.http).await,
-		ControlAction::DeleteSource {
+		ControlAction::ConfirmDeleteRender {
+			channel_id,
+			message_id,
+		} => ChannelId::new(channel_id)
+			.delete_message(&ctx.http, MessageId::new(message_id))
+			.await,
+		ControlAction::ConfirmDeleteSource {
 			channel_id,
 			message_id,
 		} => {
-			ChannelId::new(channel_id)
+			inline_math_settings
+				.mark_source_deletion(channel_id, message_id)
+				.await;
+			let deletion = ChannelId::new(channel_id)
 				.delete_message(&ctx.http, MessageId::new(message_id))
-				.await
+				.await;
+			if deletion.is_err() {
+				inline_math_settings
+					.cancel_source_deletion(channel_id, message_id)
+					.await;
+			}
+			deletion
 		}
-		ControlAction::PublishRender => unreachable!(),
+		_ => unreachable!(),
 	};
 
 	let response = match deletion {
@@ -263,6 +408,49 @@ pub(crate) async fn handle_component_interaction(
 	interaction
 		.edit_response(&ctx.http, EditInteractionResponse::new().content(response))
 		.await?;
+	Ok(())
+}
+
+async fn prompt_deletion_confirmation(
+	ctx: &Context,
+	interaction: &ComponentInteraction,
+	content: &str,
+	confirm_id: String,
+	owner_id: u64,
+	expires_at: u64,
+	already_deferred: bool,
+) -> serenity::Result<()> {
+	let cancel_id = format!("typst:v1:{expires_at}:{owner_id}:cancel");
+	let components = vec![CreateActionRow::Buttons(vec![
+		CreateButton::new(confirm_id)
+			.style(ButtonStyle::Danger)
+			.label("Delete"),
+		CreateButton::new(cancel_id)
+			.style(ButtonStyle::Secondary)
+			.label("Cancel"),
+	])];
+	if already_deferred {
+		interaction
+			.edit_response(
+				&ctx.http,
+				EditInteractionResponse::new()
+					.content(content)
+					.components(components),
+			)
+			.await?;
+	} else {
+		interaction
+			.create_response(
+				&ctx.http,
+				CreateInteractionResponse::Message(
+					CreateInteractionResponseMessage::new()
+						.content(content)
+						.ephemeral(true)
+						.components(components),
+				),
+			)
+			.await?;
+	}
 	Ok(())
 }
 
@@ -348,6 +536,40 @@ mod tests {
 	fn malformed_component_ids_are_ignored() {
 		assert_eq!(parse_component_id("typst:v1:bad"), None);
 		assert_eq!(parse_component_id("other:v1:500:42:render"), None);
+	}
+
+	#[test]
+	fn confirmation_ids_preserve_the_message_target() {
+		assert_eq!(
+			parse_component_id("typst:v1:500:42:confirm-render:100:200"),
+			Some(ControlId {
+				owner_id: 42,
+				expires_at: 500,
+				action: ControlAction::ConfirmDeleteRender {
+					channel_id: 100,
+					message_id: 200,
+				},
+			}),
+		);
+		assert_eq!(
+			parse_component_id("typst:v1:500:42:confirm-source:300:400"),
+			Some(ControlId {
+				owner_id: 42,
+				expires_at: 500,
+				action: ControlAction::ConfirmDeleteSource {
+					channel_id: 300,
+					message_id: 400,
+				},
+			}),
+		);
+		assert_eq!(
+			parse_component_id("typst:v1:500:42:cancel"),
+			Some(ControlId {
+				owner_id: 42,
+				expires_at: 500,
+				action: ControlAction::CancelDeletion,
+			}),
+		);
 	}
 
 	#[test]
