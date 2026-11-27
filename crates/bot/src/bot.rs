@@ -527,6 +527,8 @@ async fn slash_render(
 	let mut source = preamble.preamble();
 	source.push_str(&code);
 
+	ctx.defer().await?;
+
 	let pool = &ctx.data().pool;
 	let (progress_send, _progress_recv) = mpsc::channel(4);
 	let res = pool.lock().await.render(source, progress_send).await;
@@ -746,12 +748,17 @@ async fn slash_ast(
 	ctx: Context<'_>,
 	#[description = "Typst source code"] code: String,
 ) -> Result<(), PoiseError> {
+	ctx.defer().await?;
 	respond_with_ast(ctx, code).await
 }
 
 /// Show the bot's Typst version.
 #[poise::command(prefix_command, slash_command)]
 async fn version(ctx: Context<'_>) -> Result<(), PoiseError> {
+	if matches!(&ctx, poise::Context::Application(_)) {
+		ctx.defer().await?;
+	}
+
 	let pool = &ctx.data().pool;
 
 	let res = pool.lock().await.version().await;
